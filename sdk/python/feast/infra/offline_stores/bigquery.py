@@ -1002,7 +1002,8 @@ SELECT {{ final_output_feature_names | backticks | join(', ')}}
 FROM entity_dataframe
 {% for featureview in featureviews %}
 LEFT JOIN (
-    SELECT * FROM {{ featureview.name }}__cleaned
+    SELECT * EXCEPT ( {{ featureview.entities | join(', ') }})
+    FROM {{ featureview.name }}__cleaned
 ) USING ({{featureview.name}}__entity_row_unique_id)
 {% endfor %}
 """
