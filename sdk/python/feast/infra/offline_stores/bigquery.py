@@ -1002,11 +1002,7 @@ SELECT {{ final_output_feature_names | backticks | join(', ')}}
 FROM entity_dataframe
 {% for featureview in featureviews %}
 LEFT JOIN (
-    SELECT
-        {{featureview.name}}__entity_row_unique_id
-        {% for feature in featureview.features %}
-            ,{% if full_feature_names %}{{ featureview.name }}__{{featureview.field_mapping.get(feature, feature)}}{% else %}{{ featureview.field_mapping.get(feature, feature) | backticks }}{% endif %}
-        {% endfor %}
+    SELECT * EXCEPT ( {{ featureview.entities | join(', ') }})
     FROM {{ featureview.name }}__cleaned
 ) USING ({{featureview.name}}__entity_row_unique_id)
 {% endfor %}
