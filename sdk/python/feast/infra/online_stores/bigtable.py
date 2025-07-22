@@ -3,6 +3,7 @@ import logging
 from concurrent import futures
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Set, Tuple
+import sys
 
 import google
 from google.cloud import bigtable
@@ -75,15 +76,21 @@ class BigtableOnlineStore(OnlineStore):
         row_set = bigtable.row_set.RowSet()
         for row_key in row_keys:
             row_set.add_row_key(row_key)
+
+        if requested_features:
+            column_filter = row_filters.ColumnQualifierRegexFilter(
+                f"^({'|'.join(requested_features)}|event_ts)$".encode()
+            )
+        else:
+            column_filter = None
+        column_filter_size = sys.getsizeof(column_filter)
+
+        logger.info(
+            f"Reading rows for {feature_view.name} {row_keys=} {requested_features=} {column_filter_size=}"
+        )
         rows = bt_table.read_rows(
             row_set=row_set,
-            filter_=(
-                row_filters.ColumnQualifierRegexFilter(
-                    f"^({'|'.join(requested_features)}|event_ts)$".encode()
-                )
-                if requested_features
-                else None
-            ),
+            filter_=column_filter,
         )
 
         # The BigTable client library only returns rows for keys that are found. This
