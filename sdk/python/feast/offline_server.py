@@ -5,7 +5,7 @@ import os
 import sys
 import traceback
 from datetime import datetime
-from typing import Any, Dict, List, cast
+from typing import Any, Dict, List, Optional, cast
 
 import click
 import pyarrow as pa
@@ -354,13 +354,16 @@ class OfflineServer(fl.FlightServerBase):
         assert_permissions(data_source, actions=[AuthzedAction.READ_OFFLINE])
 
         return self.offline_store.pull_all_from_table_or_query(
-            self.store.config,
-            data_source,
-            command["join_key_columns"],
-            command["feature_name_columns"],
-            command["timestamp_field"],
-            utils.make_tzaware(datetime.fromisoformat(command["start_date"])),
-            utils.make_tzaware(datetime.fromisoformat(command["end_date"])),
+            config=self.store.config,
+            data_source=data_source,
+            join_key_columns=command["join_key_columns"],
+            feature_name_columns=command["feature_name_columns"],
+            created_timestamp_column=command["created_timestamp_column"],
+            timestamp_field=command["timestamp_field"],
+            start_date=utils.make_tzaware(
+                datetime.fromisoformat(command["start_date"])
+            ),
+            end_date=utils.make_tzaware(datetime.fromisoformat(command["end_date"])),
         )
 
     def _validate_pull_latest_from_table_or_query_parameters(self, command: dict):
@@ -410,20 +413,27 @@ class OfflineServer(fl.FlightServerBase):
             ),
         ]
 
-    def _validate_get_historical_features_parameters(self, command: dict, key: str):
-        assert key in self.flights, f"missing key={key}"
+    def _validate_get_historical_features_parameters(
+        self, command: dict, key: Optional[str] = None
+    ):
+        if key:
+            assert key in self.flights, f"missing key={key}"
         assert "feature_view_names" in command, "feature_view_names is mandatory"
         assert "name_aliases" in command, "name_aliases is mandatory"
         assert "feature_refs" in command, "feature_refs is mandatory"
         assert "project" in command, "project is mandatory"
         assert "full_feature_names" in command, "full_feature_names is mandatory"
 
-    def get_historical_features(self, command: dict, key: str):
+    def get_historical_features(self, command: dict, key: Optional[str] = None):
         self._validate_get_historical_features_parameters(command, key)
-
-        # Extract parameters from the internal flights dictionary
-        entity_df_value = self.flights[key]
-        entity_df = pa.Table.to_pandas(entity_df_value)
+        entity_df = None
+        if key:
+            # Extract parameters from the internal flights dictionary
+            entity_df_value = self.flights[key]
+            entity_df = pa.Table.to_pandas(entity_df_value)
+            # Check if this is a mock/empty table (contains only 'key' column)
+            if len(entity_df.columns) == 1 and "key" in entity_df.columns:
+                entity_df = None
 
         feature_view_names = command["feature_view_names"]
         name_aliases = command["name_aliases"]
@@ -442,6 +452,17 @@ class OfflineServer(fl.FlightServerBase):
                 resource=feature_view, actions=[AuthzedAction.READ_OFFLINE]
             )
 
+        # Extract and deserialize start_date/end_date if present
+        kwargs = {}
+        if "start_date" in command and command["start_date"] is not None:
+            kwargs["start_date"] = utils.make_tzaware(
+                datetime.fromisoformat(command["start_date"])
+            )
+        if "end_date" in command and command["end_date"] is not None:
+            kwargs["end_date"] = utils.make_tzaware(
+                datetime.fromisoformat(command["end_date"])
+            )
+
         retJob = self.offline_store.get_historical_features(
             config=self.store.config,
             feature_views=feature_views,
@@ -450,6 +471,7 @@ class OfflineServer(fl.FlightServerBase):
             registry=self.store.registry,
             project=project,
             full_feature_names=full_feature_names,
+            **kwargs,
         )
 
         return retJob

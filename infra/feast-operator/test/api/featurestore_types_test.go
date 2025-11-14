@@ -18,6 +18,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+func boolPtr(b bool) *bool {
+	return &b
+}
+
 func createFeatureStore() *feastdevv1alpha1.FeatureStore {
 	return &feastdevv1alpha1.FeatureStore{
 		ObjectMeta: metav1.ObjectMeta{
@@ -336,6 +340,133 @@ func registryStoreWithDBPersistenceType(dbPersistenceType string, featureStore *
 	return fsCopy
 }
 
+func registryWithRestAPIFalse(featureStore *feastdevv1alpha1.FeatureStore) *feastdevv1alpha1.FeatureStore {
+	fsCopy := featureStore.DeepCopy()
+	fsCopy.Spec.Services = &feastdevv1alpha1.FeatureStoreServices{
+		Registry: &feastdevv1alpha1.Registry{
+			Local: &feastdevv1alpha1.LocalRegistryConfig{
+				Server: &feastdevv1alpha1.RegistryServerConfigs{
+					RestAPI: boolPtr(false),
+				},
+			},
+		},
+	}
+	return fsCopy
+}
+
+func registryWithOnlyRestAPI(featureStore *feastdevv1alpha1.FeatureStore) *feastdevv1alpha1.FeatureStore {
+	fsCopy := featureStore.DeepCopy()
+	fsCopy.Spec.Services = &feastdevv1alpha1.FeatureStoreServices{
+		Registry: &feastdevv1alpha1.Registry{
+			Local: &feastdevv1alpha1.LocalRegistryConfig{
+				Server: &feastdevv1alpha1.RegistryServerConfigs{
+					RestAPI: boolPtr(true),
+				},
+			},
+		},
+	}
+	return fsCopy
+}
+
+func registryWithOnlyGRPC(featureStore *feastdevv1alpha1.FeatureStore) *feastdevv1alpha1.FeatureStore {
+	fsCopy := featureStore.DeepCopy()
+	fsCopy.Spec.Services = &feastdevv1alpha1.FeatureStoreServices{
+		Registry: &feastdevv1alpha1.Registry{
+			Local: &feastdevv1alpha1.LocalRegistryConfig{
+				Server: &feastdevv1alpha1.RegistryServerConfigs{
+					GRPC: boolPtr(true),
+				},
+			},
+		},
+	}
+	return fsCopy
+}
+
+func registryWithBothAPIs(featureStore *feastdevv1alpha1.FeatureStore) *feastdevv1alpha1.FeatureStore {
+	fsCopy := featureStore.DeepCopy()
+	fsCopy.Spec.Services = &feastdevv1alpha1.FeatureStoreServices{
+		Registry: &feastdevv1alpha1.Registry{
+			Local: &feastdevv1alpha1.LocalRegistryConfig{
+				Server: &feastdevv1alpha1.RegistryServerConfigs{
+					RestAPI: boolPtr(true),
+					GRPC:    boolPtr(true),
+				},
+			},
+		},
+	}
+	return fsCopy
+}
+
+func registryWithNoAPIs(featureStore *feastdevv1alpha1.FeatureStore) *feastdevv1alpha1.FeatureStore {
+	fsCopy := featureStore.DeepCopy()
+	fsCopy.Spec.Services = &feastdevv1alpha1.FeatureStoreServices{
+		Registry: &feastdevv1alpha1.Registry{
+			Local: &feastdevv1alpha1.LocalRegistryConfig{
+				Server: &feastdevv1alpha1.RegistryServerConfigs{},
+			},
+		},
+	}
+	return fsCopy
+}
+
+func registryWithBothFalse(featureStore *feastdevv1alpha1.FeatureStore) *feastdevv1alpha1.FeatureStore {
+	fsCopy := featureStore.DeepCopy()
+	fsCopy.Spec.Services = &feastdevv1alpha1.FeatureStoreServices{
+		Registry: &feastdevv1alpha1.Registry{
+			Local: &feastdevv1alpha1.LocalRegistryConfig{
+				Server: &feastdevv1alpha1.RegistryServerConfigs{
+					RestAPI: boolPtr(false),
+					GRPC:    boolPtr(false),
+				},
+			},
+		},
+	}
+	return fsCopy
+}
+
+func registryWithGRPCFalse(featureStore *feastdevv1alpha1.FeatureStore) *feastdevv1alpha1.FeatureStore {
+	fsCopy := featureStore.DeepCopy()
+	fsCopy.Spec.Services = &feastdevv1alpha1.FeatureStoreServices{
+		Registry: &feastdevv1alpha1.Registry{
+			Local: &feastdevv1alpha1.LocalRegistryConfig{
+				Server: &feastdevv1alpha1.RegistryServerConfigs{
+					GRPC: boolPtr(false),
+				},
+			},
+		},
+	}
+	return fsCopy
+}
+
+func cronJobWithAnnotations(featureStore *feastdevv1alpha1.FeatureStore) *feastdevv1alpha1.FeatureStore {
+	fsCopy := featureStore.DeepCopy()
+	fsCopy.Spec.CronJob = &feastdevv1alpha1.FeastCronJob{
+		Annotations: map[string]string{
+			"test-annotation":    "test-value",
+			"another-annotation": "another-value",
+		},
+		Schedule: "0 0 * * *",
+	}
+	return fsCopy
+}
+
+func cronJobWithEmptyAnnotations(featureStore *feastdevv1alpha1.FeatureStore) *feastdevv1alpha1.FeatureStore {
+	fsCopy := featureStore.DeepCopy()
+	fsCopy.Spec.CronJob = &feastdevv1alpha1.FeastCronJob{
+		Annotations: map[string]string{},
+		Schedule:    "0 0 * * *",
+	}
+	return fsCopy
+}
+
+func cronJobWithoutAnnotations(featureStore *feastdevv1alpha1.FeatureStore) *feastdevv1alpha1.FeatureStore {
+	fsCopy := featureStore.DeepCopy()
+	fsCopy.Spec.CronJob = &feastdevv1alpha1.FeastCronJob{
+		Schedule: "0 0 * * *",
+	}
+	return fsCopy
+}
+
 func quotedSlice(stringSlice []string) string {
 	quotedSlice := make([]string, len(stringSlice))
 
@@ -474,6 +605,145 @@ var _ = Describe("FeatureStore API", func() {
 		ctx, featurestore := initContext()
 		It("should fail when both kubernetes and oidc settings are given", func() {
 			attemptInvalidCreationAndAsserts(ctx, authzConfigWithOidc(authzConfigWithKubernetes(featurestore)), "One selection required between kubernetes or oidc")
+		})
+	})
+
+	Context("When creating a Registry", func() {
+		ctx := context.Background()
+
+		BeforeEach(func() {
+			By("verifying the custom resource FeatureStore is not there")
+			resource := &feastdevv1alpha1.FeatureStore{}
+			err := k8sClient.Get(ctx, typeNamespacedName, resource)
+			Expect(err != nil && errors.IsNotFound(err)).To(BeTrue())
+		})
+		AfterEach(func() {
+			By("Cleaning up the test resource")
+			resource := &feastdevv1alpha1.FeatureStore{}
+			err := k8sClient.Get(ctx, typeNamespacedName, resource)
+			if err == nil {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			}
+			err = k8sClient.Get(ctx, typeNamespacedName, resource)
+			Expect(err != nil && errors.IsNotFound(err)).To(BeTrue())
+		})
+
+		Context("with valid API configurations", func() {
+			It("should succeed when restAPI is false and grpc is not specified (defaults to true)", func() {
+				featurestore := createFeatureStore()
+				resource := registryWithRestAPIFalse(featurestore)
+				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			})
+
+			It("should succeed when restAPI is true and grpc is not specified (defaults to true)", func() {
+				featurestore := createFeatureStore()
+				resource := registryWithOnlyRestAPI(featurestore)
+				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			})
+
+			It("should succeed when only grpc is true", func() {
+				featurestore := createFeatureStore()
+				resource := registryWithOnlyGRPC(featurestore)
+				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			})
+
+			It("should succeed when both APIs are true", func() {
+				featurestore := createFeatureStore()
+				resource := registryWithBothAPIs(featurestore)
+				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			})
+
+			It("should succeed when no APIs are specified (grpc defaults to true)", func() {
+				featurestore := createFeatureStore()
+				resource := registryWithNoAPIs(featurestore)
+				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			})
+		})
+
+		Context("with invalid API configurations", func() {
+			It("should fail when both APIs are explicitly false", func() {
+				featurestore := createFeatureStore()
+				resource := registryWithBothFalse(featurestore)
+				attemptInvalidCreationAndAsserts(ctx, resource, "At least one of restAPI or grpc must be true")
+			})
+
+			It("should fail when grpc is false and restAPI is not specified", func() {
+				featurestore := createFeatureStore()
+				resource := registryWithGRPCFalse(featurestore)
+				attemptInvalidCreationAndAsserts(ctx, resource, "At least one of restAPI or grpc must be true")
+			})
+		})
+	})
+
+	Context("When creating a CronJob", func() {
+		ctx := context.Background()
+
+		BeforeEach(func() {
+			By("verifying the custom resource FeatureStore is not there")
+			resource := &feastdevv1alpha1.FeatureStore{}
+			err := k8sClient.Get(ctx, typeNamespacedName, resource)
+			Expect(err != nil && errors.IsNotFound(err)).To(BeTrue())
+		})
+		AfterEach(func() {
+			By("Cleaning up the test resource")
+			resource := &feastdevv1alpha1.FeatureStore{}
+			err := k8sClient.Get(ctx, typeNamespacedName, resource)
+			if err == nil {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			}
+			err = k8sClient.Get(ctx, typeNamespacedName, resource)
+			Expect(err != nil && errors.IsNotFound(err)).To(BeTrue())
+		})
+
+		Context("with annotations", func() {
+			It("should succeed when annotations are provided", func() {
+				featurestore := createFeatureStore()
+				resource := cronJobWithAnnotations(featurestore)
+				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			})
+
+			It("should succeed when annotations are empty", func() {
+				featurestore := createFeatureStore()
+				resource := cronJobWithEmptyAnnotations(featurestore)
+				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			})
+
+			It("should succeed when annotations are not specified", func() {
+				featurestore := createFeatureStore()
+				resource := cronJobWithoutAnnotations(featurestore)
+				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			})
+
+			It("should apply the annotations correctly in the status", func() {
+				featurestore := createFeatureStore()
+				resource := cronJobWithAnnotations(featurestore)
+				services.ApplyDefaultsToStatus(resource)
+
+				Expect(resource.Status.Applied.CronJob).NotTo(BeNil())
+				Expect(resource.Status.Applied.CronJob.Annotations).NotTo(BeNil())
+				Expect(resource.Status.Applied.CronJob.Annotations).To(HaveLen(2))
+				Expect(resource.Status.Applied.CronJob.Annotations["test-annotation"]).To(Equal("test-value"))
+				Expect(resource.Status.Applied.CronJob.Annotations["another-annotation"]).To(Equal("another-value"))
+			})
+
+			It("should keep empty annotations in the status", func() {
+				featurestore := createFeatureStore()
+				resource := cronJobWithEmptyAnnotations(featurestore)
+				services.ApplyDefaultsToStatus(resource)
+
+				Expect(resource.Status.Applied.CronJob).NotTo(BeNil())
+				Expect(resource.Status.Applied.CronJob.Annotations).NotTo(BeNil())
+				Expect(resource.Status.Applied.CronJob.Annotations).To(BeEmpty())
+			})
+
+			It("should have nil annotations in status when not specified", func() {
+				featurestore := createFeatureStore()
+				resource := cronJobWithoutAnnotations(featurestore)
+				services.ApplyDefaultsToStatus(resource)
+
+				Expect(resource.Status.Applied.CronJob).NotTo(BeNil())
+				Expect(resource.Status.Applied.CronJob.Annotations).To(BeNil())
+			})
 		})
 	})
 })

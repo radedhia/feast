@@ -54,6 +54,11 @@ func (feast *FeastServices) Deploy() error {
 	if feast.noLocalCoreServerConfigured() {
 		return errors.New("at least one local server must be configured. e.g. registry / online / offline")
 	}
+	if feast.isRegistryServer() {
+		if !feast.isRegistryGrpcEnabled() && !feast.isRegistryRestEnabled() {
+			return errors.New("at least one of gRPC or REST API must be enabled for registry service")
+		}
+	}
 	openshiftTls, err := feast.checkOpenshiftTls()
 	if err != nil {
 		return err
@@ -134,6 +139,12 @@ func (feast *FeastServices) Deploy() error {
 		return err
 	}
 	if err := feast.deployClient(); err != nil {
+		return err
+	}
+	if err := feast.deployNamespaceRegistry(); err != nil {
+		return err
+	}
+	if err := feast.deployCronJob(); err != nil {
 		return err
 	}
 
@@ -218,11 +229,52 @@ func (feast *FeastServices) deployFeastServiceByType(feastType FeastServiceType)
 		_ = feast.Handler.DeleteOwnedFeastObj(feast.initPVC(feastType))
 	}
 	if serviceConfig := feast.getServerConfigs(feastType); serviceConfig != nil {
-		if err := feast.createService(feastType); err != nil {
-			return feast.setFeastServiceCondition(err, feastType)
+		// For registry service, handle both gRPC and REST services
+		if feastType == RegistryFeastType && feast.isRegistryServer() {
+			// Create gRPC service if enabled
+			if feast.isRegistryGrpcEnabled() {
+				if err := feast.createService(feastType); err != nil {
+					return feast.setFeastServiceCondition(err, feastType)
+				}
+			} else {
+				// Delete gRPC service if disabled
+				_ = feast.Handler.DeleteOwnedFeastObj(&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      feast.GetFeastServiceName(feastType),
+						Namespace: feast.Handler.FeatureStore.Namespace,
+					},
+				})
+			}
+
+			// Create REST service if enabled
+			if feast.isRegistryRestEnabled() {
+				if err := feast.createRestService(feastType); err != nil {
+					return feast.setFeastServiceCondition(err, feastType)
+				}
+			} else {
+				// Delete REST service if disabled
+				_ = feast.Handler.DeleteOwnedFeastObj(&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      feast.GetFeastRestServiceName(feastType),
+						Namespace: feast.Handler.FeatureStore.Namespace,
+					},
+				})
+			}
+		} else {
+			// For non-registry services, always create service
+			if err := feast.createService(feastType); err != nil {
+				return feast.setFeastServiceCondition(err, feastType)
+			}
 		}
 	} else {
 		_ = feast.Handler.DeleteOwnedFeastObj(feast.initFeastSvc(feastType))
+		// Delete REST API service if it exists
+		_ = feast.Handler.DeleteOwnedFeastObj(&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      feast.GetFeastRestServiceName(feastType),
+				Namespace: feast.Handler.FeatureStore.Namespace,
+			},
+		})
 	}
 	return feast.setFeastServiceCondition(nil, feastType)
 }
@@ -253,7 +305,7 @@ func (feast *FeastServices) createService(feastType FeastServiceType) error {
 	logger := log.FromContext(feast.Handler.Context)
 	svc := feast.initFeastSvc(feastType)
 	if op, err := controllerutil.CreateOrUpdate(feast.Handler.Context, feast.Handler.Client, svc, controllerutil.MutateFn(func() error {
-		return feast.setService(svc, feastType)
+		return feast.setService(svc, feastType, false)
 	})); err != nil {
 		return err
 	} else if op == controllerutil.OperationResultCreated || op == controllerutil.OperationResultUpdated {
@@ -328,9 +380,12 @@ func (feast *FeastServices) createPVC(pvcCreate *feastdevv1alpha1.PvcCreate, fea
 }
 
 func (feast *FeastServices) setDeployment(deploy *appsv1.Deployment) error {
+	cr := feast.Handler.FeatureStore
+	replicas := deploy.Spec.Replicas
+
 	deploy.Labels = feast.getLabels()
 	deploy.Spec = appsv1.DeploymentSpec{
-		Replicas: &DefaultReplicas,
+		Replicas: replicas,
 		Selector: metav1.SetAsLabelSelector(deploy.GetLabels()),
 		Strategy: feast.getDeploymentStrategy(),
 		Template: corev1.PodTemplateSpec{
@@ -339,13 +394,14 @@ func (feast *FeastServices) setDeployment(deploy *appsv1.Deployment) error {
 			},
 			Spec: corev1.PodSpec{
 				ServiceAccountName: feast.initFeastSA().Name,
+				SecurityContext:    cr.Status.Applied.Services.SecurityContext,
 			},
 		},
 	}
 	if err := feast.setPod(&deploy.Spec.Template.Spec); err != nil {
 		return err
 	}
-	return controllerutil.SetControllerReference(feast.Handler.FeatureStore, deploy, feast.Handler.Scheme)
+	return controllerutil.SetControllerReference(cr, deploy, feast.Handler.Scheme)
 }
 
 func (feast *FeastServices) setPod(podSpec *corev1.PodSpec) error {
@@ -356,6 +412,7 @@ func (feast *FeastServices) setPod(podSpec *corev1.PodSpec) error {
 	feast.mountPvcConfigs(podSpec)
 	feast.mountEmptyDirVolumes(podSpec)
 	feast.mountUserDefinedVolumes(podSpec)
+	feast.applyNodeSelector(podSpec)
 
 	return nil
 }
@@ -384,49 +441,77 @@ func (feast *FeastServices) setContainers(podSpec *corev1.PodSpec) error {
 
 func (feast *FeastServices) setContainer(containers *[]corev1.Container, feastType FeastServiceType, fsYamlB64 string) {
 	if serverConfigs := feast.getServerConfigs(feastType); serverConfigs != nil {
-		defaultCtrConfigs := serverConfigs.ContainerConfigs.DefaultCtrConfigs
+		name := string(feastType)
+		workingDir := feast.getFeatureRepoDir()
+		cmd := feast.getContainerCommand(feastType)
+		container := getContainer(name, workingDir, cmd, serverConfigs.ContainerConfigs, fsYamlB64)
 		tls := feast.getTlsConfigs(feastType)
-		probeHandler := getProbeHandler(feastType, tls)
-		container := &corev1.Container{
-			Name:       string(feastType),
-			Image:      *defaultCtrConfigs.Image,
-			WorkingDir: feast.getFeatureRepoDir(),
-			Command:    feast.getContainerCommand(feastType),
-			Ports: []corev1.ContainerPort{
-				{
-					Name:          string(feastType),
+		probeHandler := feast.getProbeHandler(feastType, tls)
+		container.Ports = []corev1.ContainerPort{}
+
+		if feastType == RegistryFeastType {
+			if feast.isRegistryGrpcEnabled() {
+				container.Ports = append(container.Ports, corev1.ContainerPort{
+					Name:          name,
 					ContainerPort: getTargetPort(feastType, tls),
 					Protocol:      corev1.ProtocolTCP,
-				},
-			},
-			Env: []corev1.EnvVar{
-				{
-					Name:  TmpFeatureStoreYamlEnvVar,
-					Value: fsYamlB64,
-				},
-			},
-			StartupProbe: &corev1.Probe{
-				ProbeHandler:     probeHandler,
-				PeriodSeconds:    3,
-				FailureThreshold: 40,
-			},
-			LivenessProbe: &corev1.Probe{
-				ProbeHandler:     probeHandler,
-				PeriodSeconds:    20,
-				FailureThreshold: 6,
-			},
-			ReadinessProbe: &corev1.Probe{
-				ProbeHandler:  probeHandler,
-				PeriodSeconds: 10,
-			},
+				})
+			}
+			if feast.isRegistryRestEnabled() {
+				container.Ports = append(container.Ports, corev1.ContainerPort{
+					Name:          name + "-rest",
+					ContainerPort: getTargetRestPort(feastType, tls),
+					Protocol:      corev1.ProtocolTCP,
+				})
+			}
+		} else {
+			container.Ports = append(container.Ports, corev1.ContainerPort{
+				Name:          name,
+				ContainerPort: getTargetPort(feastType, tls),
+				Protocol:      corev1.ProtocolTCP,
+			})
 		}
-		applyOptionalCtrConfigs(container, serverConfigs.ContainerConfigs.OptionalCtrConfigs)
+
+		container.StartupProbe = &corev1.Probe{
+			ProbeHandler:     probeHandler,
+			PeriodSeconds:    3,
+			FailureThreshold: 40,
+		}
+		container.LivenessProbe = &corev1.Probe{
+			ProbeHandler:     probeHandler,
+			PeriodSeconds:    20,
+			FailureThreshold: 6,
+		}
+		container.ReadinessProbe = &corev1.Probe{
+			ProbeHandler:  probeHandler,
+			PeriodSeconds: 10,
+		}
 		volumeMounts := feast.getVolumeMounts(feastType)
 		if len(volumeMounts) > 0 {
 			container.VolumeMounts = append(container.VolumeMounts, volumeMounts...)
 		}
 		*containers = append(*containers, *container)
 	}
+}
+
+func getContainer(name, workingDir string, cmd []string, containerConfigs feastdevv1alpha1.ContainerConfigs, fsYamlB64 string) *corev1.Container {
+	container := &corev1.Container{
+		Name:    name,
+		Command: cmd,
+	}
+	if len(workingDir) > 0 {
+		container.WorkingDir = workingDir
+	}
+	if len(fsYamlB64) > 0 {
+		container.Env = []corev1.EnvVar{
+			{
+				Name:  TmpFeatureStoreYamlEnvVar,
+				Value: fsYamlB64,
+			},
+		}
+	}
+	applyCtrConfigs(container, containerConfigs)
+	return container
 }
 
 func (feast *FeastServices) mountUserDefinedVolumes(podSpec *corev1.PodSpec) {
@@ -463,7 +548,7 @@ func (feast *FeastServices) setRoute(route *routev1.Route, feastType FeastServic
 	}
 	if tls.IsTLS() {
 		route.Spec.TLS = &routev1.TLSConfig{
-			Termination:                   routev1.TLSTerminationPassthrough,
+			Termination:                   routev1.TLSTerminationReencrypt,
 			InsecureEdgeTerminationPolicy: routev1.InsecureEdgeTerminationPolicyRedirect,
 		}
 	}
@@ -482,6 +567,18 @@ func (feast *FeastServices) getContainerCommand(feastType FeastServiceType) []st
 	deploySettings := FeastServiceConstants[feastType]
 	targetPort := deploySettings.TargetHttpPort
 	tls := feast.getTlsConfigs(feastType)
+
+	if feastType == RegistryFeastType && feast.isRegistryServer() {
+		if feast.isRegistryGrpcEnabled() {
+			deploySettings.Args = append(deploySettings.Args, "--grpc")
+		} else {
+			deploySettings.Args = append(deploySettings.Args, "--no-grpc")
+		}
+		if feast.isRegistryRestEnabled() {
+			deploySettings.Args = append(deploySettings.Args, "--rest-api")
+			deploySettings.Args = append(deploySettings.Args, "--rest-port", strconv.Itoa(int(getTargetRestPort(feastType, tls))))
+		}
+	}
 	if tls.IsTLS() {
 		targetPort = deploySettings.TargetHttpsPort
 		feastTlsPath := GetTlsPath(feastType)
@@ -566,11 +663,38 @@ func (feast *FeastServices) setInitContainer(podSpec *corev1.PodSpec, fsYamlB64 
 	}
 }
 
-func (feast *FeastServices) setService(svc *corev1.Service, feastType FeastServiceType) error {
+func (feast *FeastServices) setService(svc *corev1.Service, feastType FeastServiceType, isRestService bool) error {
 	svc.Labels = feast.getFeastTypeLabels(feastType)
 	if feast.isOpenShiftTls(feastType) {
-		svc.Annotations = map[string]string{
-			"service.beta.openshift.io/serving-cert-secret-name": svc.Name + tlsNameSuffix,
+		if len(svc.Annotations) == 0 {
+			svc.Annotations = map[string]string{}
+		}
+
+		// For registry services, we need special handling based on which services are enabled
+		if feastType == RegistryFeastType && feast.isRegistryServer() {
+			grpcEnabled := feast.isRegistryGrpcEnabled()
+			restEnabled := feast.isRegistryRestEnabled()
+
+			if grpcEnabled && restEnabled {
+				// Both services enabled: Use gRPC service name as primary, add REST as SAN
+				grpcSvcName := feast.initFeastSvc(RegistryFeastType).Name
+				svc.Annotations["service.beta.openshift.io/serving-cert-secret-name"] = grpcSvcName + tlsNameSuffix
+
+				// Add Subject Alternative Names (SANs) for both services
+				grpcHostname := grpcSvcName + "." + svc.Namespace + ".svc.cluster.local"
+				restHostname := feast.GetFeastRestServiceName(RegistryFeastType) + "." + svc.Namespace + ".svc.cluster.local"
+				svc.Annotations["service.beta.openshift.io/serving-cert-sans"] = grpcHostname + "," + restHostname
+			} else if grpcEnabled && !restEnabled {
+				// Only gRPC enabled: Use gRPC service name
+				grpcSvcName := feast.initFeastSvc(RegistryFeastType).Name
+				svc.Annotations["service.beta.openshift.io/serving-cert-secret-name"] = grpcSvcName + tlsNameSuffix
+			} else if !grpcEnabled && restEnabled {
+				// Only REST enabled: Use REST service name
+				svc.Annotations["service.beta.openshift.io/serving-cert-secret-name"] = svc.Name + tlsNameSuffix
+			}
+		} else {
+			// Standard behavior for non-registry services
+			svc.Annotations["service.beta.openshift.io/serving-cert-secret-name"] = svc.Name + tlsNameSuffix
 		}
 	}
 
@@ -581,6 +705,14 @@ func (feast *FeastServices) setService(svc *corev1.Service, feastType FeastServi
 		port = HttpsPort
 		scheme = HttpsScheme
 	}
+
+	var targetPort int32
+	if isRestService {
+		targetPort = getTargetRestPort(feastType, tls)
+	} else {
+		targetPort = getTargetPort(feastType, tls)
+	}
+
 	svc.Spec = corev1.ServiceSpec{
 		Selector: feast.getLabels(),
 		Type:     corev1.ServiceTypeClusterIP,
@@ -589,12 +721,31 @@ func (feast *FeastServices) setService(svc *corev1.Service, feastType FeastServi
 				Name:       scheme,
 				Port:       port,
 				Protocol:   corev1.ProtocolTCP,
-				TargetPort: intstr.FromInt(int(getTargetPort(feastType, tls))),
+				TargetPort: intstr.FromInt(int(targetPort)),
 			},
 		},
 	}
 
 	return controllerutil.SetControllerReference(feast.Handler.FeatureStore, svc, feast.Handler.Scheme)
+}
+
+// createRestService creates a separate service for the Registry REST API
+func (feast *FeastServices) createRestService(feastType FeastServiceType) error {
+	if feast.isRegistryServer() {
+		if !feast.isRegistryRestEnabled() {
+			return nil
+		}
+		logger := log.FromContext(feast.Handler.Context)
+		svc := feast.initFeastRestSvc(feastType)
+		if op, err := controllerutil.CreateOrUpdate(feast.Handler.Context, feast.Handler.Client, svc, controllerutil.MutateFn(func() error {
+			return feast.setService(svc, feastType, true)
+		})); err != nil {
+			return err
+		} else if op == controllerutil.OperationResultCreated || op == controllerutil.OperationResultUpdated {
+			logger.Info("Successfully reconciled", "Service", svc.Name, "operation", op)
+		}
+	}
+	return nil
 }
 
 func (feast *FeastServices) setServiceAccount(sa *corev1.ServiceAccount) error {
@@ -627,8 +778,8 @@ func (feast *FeastServices) getServerConfigs(feastType FeastServiceType) *feastd
 			return appliedServices.OnlineStore.Server
 		}
 	case RegistryFeastType:
-		if feast.isLocalRegistry() {
-			return appliedServices.Registry.Local.Server
+		if feast.isRegistryServer() {
+			return &appliedServices.Registry.Local.Server.ServerConfigs
 		}
 	case UIFeastType:
 		return appliedServices.UI
@@ -641,6 +792,56 @@ func (feast *FeastServices) getLogLevelForType(feastType FeastServiceType) *stri
 		return serviceConfigs.LogLevel
 	}
 	return nil
+}
+
+func (feast *FeastServices) getNodeSelectorForType(feastType FeastServiceType) *map[string]string {
+	if serviceConfigs := feast.getServerConfigs(feastType); serviceConfigs != nil {
+		return serviceConfigs.ContainerConfigs.OptionalCtrConfigs.NodeSelector
+	}
+	return nil
+}
+
+func (feast *FeastServices) applyNodeSelector(podSpec *corev1.PodSpec) {
+	// Merge node selectors from all services
+	mergedNodeSelector := make(map[string]string)
+
+	// Check all service types for node selector configuration
+	allServiceTypes := append(feastServerTypes, UIFeastType)
+	for _, feastType := range allServiceTypes {
+		if selector := feast.getNodeSelectorForType(feastType); selector != nil && len(*selector) > 0 {
+			for k, v := range *selector {
+				mergedNodeSelector[k] = v
+			}
+		}
+	}
+
+	// If no service has node selector configured, we're done
+	if len(mergedNodeSelector) == 0 {
+		return
+	}
+
+	// Merge with any existing node selectors (from ops team or other sources)
+	// This preserves pre-existing selectors while adding operator requirements
+	finalNodeSelector := feast.mergeNodeSelectors(podSpec.NodeSelector, mergedNodeSelector)
+	podSpec.NodeSelector = finalNodeSelector
+}
+
+// mergeNodeSelectors merges existing and operator node selectors
+// Existing selectors are preserved, operator selectors can override existing keys
+func (feast *FeastServices) mergeNodeSelectors(existing, operator map[string]string) map[string]string {
+	merged := make(map[string]string)
+
+	// Start with existing selectors (from ops team or other sources)
+	for k, v := range existing {
+		merged[k] = v
+	}
+
+	// Add/override with operator selectors
+	for k, v := range operator {
+		merged[k] = v
+	}
+
+	return merged
 }
 
 // GetObjectMeta returns the feast k8s object metadata with type
@@ -702,6 +903,12 @@ func (feast *FeastServices) setServiceHostnames() error {
 		objMeta := feast.initFeastSvc(RegistryFeastType)
 		feast.Handler.FeatureStore.Status.ServiceHostnames.Registry = objMeta.Name + "." + objMeta.Namespace + domain +
 			getPortStr(feast.Handler.FeatureStore.Status.Applied.Services.Registry.Local.Server.TLS)
+		if feast.isRegistryRestEnabled() {
+			// Use the REST API service name
+			restSvcName := feast.GetFeastRestServiceName(RegistryFeastType)
+			feast.Handler.FeatureStore.Status.ServiceHostnames.RegistryRest = restSvcName + "." + objMeta.Namespace + domain +
+				getPortStr(feast.Handler.FeatureStore.Status.Applied.Services.Registry.Local.Server.TLS)
+		}
 	} else if feast.isRemoteRegistry() {
 		return feast.setRemoteRegistryURL()
 	}
@@ -741,6 +948,10 @@ func (feast *FeastServices) setRemoteRegistryURL() error {
 			remoteFeast.isRegistryServer() &&
 			apimeta.IsStatusConditionTrue(remoteFeast.Handler.FeatureStore.Status.Conditions, feastdevv1alpha1.RegistryReadyType) &&
 			len(remoteFeast.Handler.FeatureStore.Status.ServiceHostnames.Registry) > 0 {
+			// Check if gRPC server is enabled
+			if !remoteFeast.isRegistryGrpcEnabled() {
+				return errors.New("Remote feast registry of referenced FeatureStore '" + remoteFeast.Handler.FeatureStore.Name + "' must have gRPC server enabled")
+			}
 			feast.Handler.FeatureStore.Status.ServiceHostnames.Registry = remoteFeast.Handler.FeatureStore.Status.ServiceHostnames.Registry
 		} else {
 			return errors.New("Remote feast registry of referenced FeatureStore '" + remoteFeast.Handler.FeatureStore.Name + "' is not ready")
@@ -846,6 +1057,18 @@ func (feast *FeastServices) initFeastSvc(feastType FeastServiceType) *corev1.Ser
 	return svc
 }
 
+func (feast *FeastServices) initFeastRestSvc(feastType FeastServiceType) *corev1.Service {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      feast.GetFeastRestServiceName(feastType),
+			Namespace: feast.Handler.FeatureStore.Namespace,
+			Labels:    feast.getFeastTypeLabels(feastType),
+		},
+	}
+	svc.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
+	return svc
+}
+
 func (feast *FeastServices) initFeastSA() *corev1.ServiceAccount {
 	sa := &corev1.ServiceAccount{
 		ObjectMeta: feast.GetObjectMeta(),
@@ -870,18 +1093,20 @@ func (feast *FeastServices) initRoute(feastType FeastServiceType) *routev1.Route
 	return route
 }
 
-func applyOptionalCtrConfigs(container *corev1.Container, optionalConfigs feastdevv1alpha1.OptionalCtrConfigs) {
-	if optionalConfigs.Env != nil {
-		container.Env = envOverride(container.Env, *optionalConfigs.Env)
+func applyCtrConfigs(container *corev1.Container, containerConfigs feastdevv1alpha1.ContainerConfigs) {
+	container.Image = *containerConfigs.DefaultCtrConfigs.Image
+	// apply optional container configs
+	if containerConfigs.OptionalCtrConfigs.Env != nil {
+		container.Env = envOverride(container.Env, *containerConfigs.OptionalCtrConfigs.Env)
 	}
-	if optionalConfigs.EnvFrom != nil {
-		container.EnvFrom = *optionalConfigs.EnvFrom
+	if containerConfigs.OptionalCtrConfigs.EnvFrom != nil {
+		container.EnvFrom = *containerConfigs.OptionalCtrConfigs.EnvFrom
 	}
-	if optionalConfigs.ImagePullPolicy != nil {
-		container.ImagePullPolicy = *optionalConfigs.ImagePullPolicy
+	if containerConfigs.OptionalCtrConfigs.ImagePullPolicy != nil {
+		container.ImagePullPolicy = *containerConfigs.OptionalCtrConfigs.ImagePullPolicy
 	}
-	if optionalConfigs.Resources != nil {
-		container.Resources = *optionalConfigs.Resources
+	if containerConfigs.OptionalCtrConfigs.Resources != nil {
+		container.Resources = *containerConfigs.OptionalCtrConfigs.Resources
 	}
 }
 
@@ -971,8 +1196,37 @@ func getTargetPort(feastType FeastServiceType, tls *feastdevv1alpha1.TlsConfigs)
 	return FeastServiceConstants[feastType].TargetHttpPort
 }
 
-func getProbeHandler(feastType FeastServiceType, tls *feastdevv1alpha1.TlsConfigs) corev1.ProbeHandler {
+func getTargetRestPort(feastType FeastServiceType, tls *feastdevv1alpha1.TlsConfigs) int32 {
+	if tls.IsTLS() {
+		return FeastServiceConstants[feastType].TargetRestHttpsPort
+	}
+	return FeastServiceConstants[feastType].TargetRestHttpPort
+}
+
+func (feast *FeastServices) getProbeHandler(feastType FeastServiceType, tls *feastdevv1alpha1.TlsConfigs) corev1.ProbeHandler {
 	targetPort := getTargetPort(feastType, tls)
+
+	if feastType == RegistryFeastType {
+		if feast.isRegistryGrpcEnabled() {
+			return corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{
+					Port: intstr.FromInt(int(targetPort)),
+				},
+			}
+		}
+		if feast.isRegistryRestEnabled() {
+			targetPort = getTargetRestPort(feastType, tls)
+			probeHandler := corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Port: intstr.FromInt(int(targetPort)),
+				},
+			}
+			if tls.IsTLS() {
+				probeHandler.HTTPGet.Scheme = corev1.URISchemeHTTPS
+			}
+			return probeHandler
+		}
+	}
 	if feastType == OnlineFeastType {
 		probeHandler := corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
@@ -999,5 +1253,28 @@ func IsDeploymentAvailable(conditions []appsv1.DeploymentCondition) bool {
 		}
 	}
 
+	return false
+}
+
+// GetFeastRestServiceName returns the feast REST service object name based on service type
+func (feast *FeastServices) GetFeastRestServiceName(feastType FeastServiceType) string {
+	return feast.GetFeastServiceName(feastType) + "-rest"
+}
+
+// isRegistryGrpcEnabled checks if gRPC is enabled for registry service
+func (feast *FeastServices) isRegistryGrpcEnabled() bool {
+	if feast.isRegistryServer() {
+		registry := feast.Handler.FeatureStore.Status.Applied.Services.Registry
+		return registry.Local.Server.GRPC != nil && *registry.Local.Server.GRPC
+	}
+	return false
+}
+
+// isRegistryRestEnabled checks if REST API is enabled for registry service
+func (feast *FeastServices) isRegistryRestEnabled() bool {
+	if feast.isRegistryServer() {
+		registry := feast.Handler.FeatureStore.Status.Applied.Services.Registry
+		return registry.Local.Server.RestAPI != nil && *registry.Local.Server.RestAPI
+	}
 	return false
 }

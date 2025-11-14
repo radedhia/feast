@@ -23,6 +23,8 @@ from feast.value_type import ValueType
 PRIMITIVE_FEAST_TYPES_TO_VALUE_TYPES = {
     "INVALID": "UNKNOWN",
     "BYTES": "BYTES",
+    "PDF_BYTES": "PDF_BYTES",
+    "IMAGE_BYTES": "IMAGE_BYTES",
     "STRING": "STRING",
     "INT32": "INT32",
     "INT64": "INT64",
@@ -79,6 +81,8 @@ class PrimitiveFeastType(Enum):
     FLOAT32 = 6
     BOOL = 7
     UNIX_TIMESTAMP = 8
+    PDF_BYTES = 9
+    IMAGE_BYTES = 10
 
     def to_value_type(self) -> ValueType:
         """
@@ -102,6 +106,8 @@ class PrimitiveFeastType(Enum):
 
 Invalid = PrimitiveFeastType.INVALID
 Bytes = PrimitiveFeastType.BYTES
+PdfBytes = PrimitiveFeastType.PDF_BYTES
+ImageBytes = PrimitiveFeastType.IMAGE_BYTES
 String = PrimitiveFeastType.STRING
 Bool = PrimitiveFeastType.BOOL
 Int32 = PrimitiveFeastType.INT32
@@ -114,6 +120,8 @@ SUPPORTED_BASE_TYPES = [
     Invalid,
     String,
     Bytes,
+    PdfBytes,
+    ImageBytes,
     Bool,
     Int32,
     Int64,
@@ -126,6 +134,8 @@ PRIMITIVE_FEAST_TYPES_TO_STRING = {
     "INVALID": "Invalid",
     "STRING": "String",
     "BYTES": "Bytes",
+    "PDF_BYTES": "PdfBytes",
+    "IMAGE_BYTES": "ImageBytes",
     "BOOL": "Bool",
     "INT32": "Int32",
     "INT64": "Int64",
@@ -168,6 +178,8 @@ FeastType = Union[ComplexFeastType, PrimitiveFeastType]
 VALUE_TYPES_TO_FEAST_TYPES: Dict["ValueType", FeastType] = {
     ValueType.UNKNOWN: Invalid,
     ValueType.BYTES: Bytes,
+    ValueType.PDF_BYTES: PdfBytes,
+    ValueType.IMAGE_BYTES: ImageBytes,
     ValueType.STRING: String,
     ValueType.INT32: Int32,
     ValueType.INT64: Int64,

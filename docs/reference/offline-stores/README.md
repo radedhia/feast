@@ -26,6 +26,10 @@ Please see [Offline Store](../../getting-started/components/offline-store.md) fo
 [duckdb.md](duckdb.md)
 {% endcontent-ref %}
 
+{% content-ref url="couchbase.md" %}
+[couchbase.md](couchbase.md)
+{% endcontent-ref %}
+
 {% content-ref url="spark.md" %}
 [spark.md](spark.md)
 {% endcontent-ref %}
@@ -40,4 +44,8 @@ Please see [Offline Store](../../getting-started/components/offline-store.md) fo
 
 {% content-ref url="mssql.md" %}
 [mssql.md](mssql.md)
+{% endcontent-ref %}
+
+{% content-ref url="ray.md" %}
+[ray.md](ray.md)
 {% endcontent-ref %}

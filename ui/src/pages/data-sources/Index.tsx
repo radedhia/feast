@@ -1,4 +1,5 @@
 import React, { useContext } from "react";
+import { useParams } from "react-router-dom";
 
 import {
   EuiPageTemplate,
@@ -18,10 +19,12 @@ import DataSourceIndexEmptyState from "./DataSourceIndexEmptyState";
 import { DataSourceIcon } from "../../graphics/DataSourceIcon";
 import { useSearchQuery } from "../../hooks/useSearchInputWithTags";
 import { feast } from "../../protos";
+import ExportButton from "../../components/ExportButton";
 
 const useLoadDatasources = () => {
   const registryUrl = useContext(RegistryPathContext);
-  const registryQuery = useLoadRegistry(registryUrl);
+  const { projectName } = useParams();
+  const registryQuery = useLoadRegistry(registryUrl, projectName);
 
   const data =
     registryQuery.data === undefined
@@ -40,7 +43,9 @@ const filterFn = (data: feast.core.IDataSource[], searchTokens: string[]) => {
   if (searchTokens.length) {
     return filteredByTags.filter((entry) => {
       return searchTokens.find((token) => {
-        return token.length >= 3 && entry.name && entry.name.indexOf(token) >= 0;
+        return (
+          token.length >= 3 && entry.name && entry.name.indexOf(token) >= 0
+        );
       });
     });
   }
@@ -55,10 +60,7 @@ const Index = () => {
 
   const { searchString, searchTokens, setSearchString } = useSearchQuery();
 
-  const filterResult = data
-    ? filterFn(data, searchTokens)
-    : data;
-
+  const filterResult = data ? filterFn(data, searchTokens) : data;
 
   return (
     <EuiPageTemplate panelled>
@@ -66,6 +68,13 @@ const Index = () => {
         restrictWidth
         iconType={DataSourceIcon}
         pageTitle="Data Sources"
+        rightSideItems={[
+          <ExportButton
+            data={filterResult ?? []}
+            fileName="data_sources"
+            formats={["json"]}
+          />,
+        ]}
       />
       <EuiPageTemplate.Section>
         {isLoading && (

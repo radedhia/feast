@@ -116,7 +116,7 @@ class RemoteRetrievalJob(RetrievalJob):
         client: FeastFlightClient,
         api: str,
         api_parameters: Dict[str, Any],
-        entity_df: Union[pd.DataFrame, str] = None,
+        entity_df: Optional[Union[pd.DataFrame, str]] = None,
         table: pa.Table = None,
         metadata: Optional[RetrievalMetadata] = None,
     ):
@@ -193,10 +193,11 @@ class RemoteOfflineStore(OfflineStore):
         config: RepoConfig,
         feature_views: List[FeatureView],
         feature_refs: List[str],
-        entity_df: Union[pd.DataFrame, str],
+        entity_df: Optional[Union[pd.DataFrame, str]],
         registry: BaseRegistry,
         project: str,
         full_feature_names: bool = False,
+        **kwargs,
     ) -> RemoteRetrievalJob:
         assert isinstance(config.offline_store, RemoteOfflineStoreConfig)
 
@@ -219,6 +220,15 @@ class RemoteOfflineStore(OfflineStore):
             "name_aliases": name_aliases,
         }
 
+        # Extract and serialize start_date/end_date for remote transmission
+        start_date = kwargs.get("start_date", None)
+        end_date = kwargs.get("end_date", None)
+
+        if start_date is not None:
+            api_parameters["start_date"] = start_date.isoformat()
+        if end_date is not None:
+            api_parameters["end_date"] = end_date.isoformat()
+
         return RemoteRetrievalJob(
             client=client,
             api=OfflineStore.get_historical_features.__name__,
@@ -234,8 +244,9 @@ class RemoteOfflineStore(OfflineStore):
         join_key_columns: List[str],
         feature_name_columns: List[str],
         timestamp_field: str,
-        start_date: datetime,
-        end_date: datetime,
+        created_timestamp_column: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
     ) -> RetrievalJob:
         assert isinstance(config.offline_store, RemoteOfflineStoreConfig)
 
@@ -253,8 +264,9 @@ class RemoteOfflineStore(OfflineStore):
             "join_key_columns": join_key_columns,
             "feature_name_columns": feature_name_columns,
             "timestamp_field": timestamp_field,
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
+            "created_timestamp_column": created_timestamp_column,
+            "start_date": start_date.isoformat() if start_date else None,
+            "end_date": end_date.isoformat() if end_date else None,
         }
 
         return RemoteRetrievalJob(
@@ -431,7 +443,16 @@ class RemoteOfflineStore(OfflineStore):
         return zip(table.column("name").to_pylist(), table.column("type").to_pylist())
 
 
-def _create_retrieval_metadata(feature_refs: List[str], entity_df: pd.DataFrame):
+def _create_retrieval_metadata(
+    feature_refs: List[str], entity_df: Optional[pd.DataFrame] = None
+):
+    if entity_df is None:
+        return RetrievalMetadata(
+            features=feature_refs,
+            keys=[],  # No entity keys when no entity_df provided
+            min_event_timestamp=None,
+            max_event_timestamp=None,
+        )
     entity_schema = _get_entity_schema(
         entity_df=entity_df,
     )
@@ -480,8 +501,8 @@ def _get_entity_df_event_timestamp_range(
 def _send_retrieve_remote(
     api: str,
     api_parameters: Dict[str, Any],
-    entity_df: Union[pd.DataFrame, str],
-    table: pa.Table,
+    entity_df: Optional[Union[pd.DataFrame, str]],
+    table: Optional[pa.Table],
     client: FeastFlightClient,
 ):
     command_descriptor = _call_put(
@@ -508,7 +529,7 @@ def _call_put(
     api: str,
     api_parameters: Dict[str, Any],
     client: FeastFlightClient,
-    entity_df: Union[pd.DataFrame, str],
+    entity_df: Optional[Union[pd.DataFrame, str]],
     table: pa.Table,
 ):
     # Generate unique command identifier
@@ -533,7 +554,7 @@ def _call_put(
 
 def _put_parameters(
     command_descriptor: fl.FlightDescriptor,
-    entity_df: Union[pd.DataFrame, str],
+    entity_df: Optional[Union[pd.DataFrame, str]],
     table: pa.Table,
     client: FeastFlightClient,
 ):

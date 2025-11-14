@@ -61,8 +61,10 @@ var _ = Describe("FeatureStore Controller - Feast service LogLevel", func() {
 						Services: &feastdevv1alpha1.FeatureStoreServices{
 							Registry: &feastdevv1alpha1.Registry{
 								Local: &feastdevv1alpha1.LocalRegistryConfig{
-									Server: &feastdevv1alpha1.ServerConfigs{
-										LogLevel: strPtr("error"),
+									Server: &feastdevv1alpha1.RegistryServerConfigs{
+										ServerConfigs: feastdevv1alpha1.ServerConfigs{
+											LogLevel: strPtr("error"),
+										},
 									},
 								},
 							},
@@ -171,7 +173,7 @@ var _ = Describe("FeatureStore Controller - Feast service LogLevel", func() {
 				Namespace: objMeta.Namespace,
 			}, deploy)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(deploy.Spec.Replicas).To(Equal(&services.DefaultReplicas))
+			Expect(deploy.Spec.Replicas).To(Equal(int32Ptr(1)))
 			Expect(controllerutil.HasControllerReference(deploy)).To(BeTrue())
 			Expect(deploy.Spec.Template.Spec.Containers).To(HaveLen(4))
 			command := services.GetRegistryContainer(*deploy).Command
@@ -196,7 +198,9 @@ var _ = Describe("FeatureStore Controller - Feast service LogLevel", func() {
 			resource.Spec.Services = &feastdevv1alpha1.FeatureStoreServices{
 				Registry: &feastdevv1alpha1.Registry{
 					Local: &feastdevv1alpha1.LocalRegistryConfig{
-						Server: &feastdevv1alpha1.ServerConfigs{},
+						Server: &feastdevv1alpha1.RegistryServerConfigs{
+							ServerConfigs: feastdevv1alpha1.ServerConfigs{},
+						},
 					},
 				},
 				OfflineStore: &feastdevv1alpha1.OfflineStore{},
@@ -244,7 +248,3 @@ var _ = Describe("FeatureStore Controller - Feast service LogLevel", func() {
 
 	})
 })
-
-func strPtr(str string) *string {
-	return &str
-}

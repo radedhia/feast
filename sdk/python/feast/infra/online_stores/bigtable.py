@@ -175,13 +175,13 @@ class BigtableOnlineStore(OnlineStore):
                     self.feature_column_family,
                     feature_name.encode(),
                     feature_value.SerializeToString(),
-                    timestamp=utils.make_tzaware(created_ts),
+                    timestamp=utils.make_tzaware(created_ts) if created_ts else None,
                 )
             bt_row.set_cell(
                 self.feature_column_family,
                 b"event_ts",
                 utils.make_tzaware(timestamp).isoformat().encode(),
-                timestamp=utils.make_tzaware(created_ts),
+                timestamp=utils.make_tzaware(created_ts) if created_ts else None,
             )
             rows.append(bt_row)
         bt_table.mutate_rows(rows)

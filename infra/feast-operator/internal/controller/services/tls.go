@@ -19,6 +19,10 @@ package services
 import (
 	"strconv"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	feastdevv1alpha1 "github.com/feast-dev/feast/infra/feast-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -67,10 +71,31 @@ func (feast *FeastServices) setOpenshiftTls() error {
 		}
 	}
 	if feast.localRegistryOpenshiftTls() {
-		appliedServices.Registry.Local.Server.TLS = &feastdevv1alpha1.TlsConfigs{
-			SecretRef: &corev1.LocalObjectReference{
-				Name: feast.initFeastSvc(RegistryFeastType).Name + tlsNameSuffix,
-			},
+		grpcEnabled := feast.isRegistryGrpcEnabled()
+		restEnabled := feast.isRegistryRestEnabled()
+
+		if grpcEnabled && restEnabled {
+			// Both services enabled: Use gRPC service name as primary certificate
+			// The certificate will include both hostnames as SANs via service annotations
+			appliedServices.Registry.Local.Server.TLS = &feastdevv1alpha1.TlsConfigs{
+				SecretRef: &corev1.LocalObjectReference{
+					Name: feast.initFeastSvc(RegistryFeastType).Name + tlsNameSuffix,
+				},
+			}
+		} else if grpcEnabled && !restEnabled {
+			// Only gRPC enabled: Use gRPC service name
+			appliedServices.Registry.Local.Server.TLS = &feastdevv1alpha1.TlsConfigs{
+				SecretRef: &corev1.LocalObjectReference{
+					Name: feast.initFeastSvc(RegistryFeastType).Name + tlsNameSuffix,
+				},
+			}
+		} else if !grpcEnabled && restEnabled {
+			// Only REST enabled: Use REST service name
+			appliedServices.Registry.Local.Server.TLS = &feastdevv1alpha1.TlsConfigs{
+				SecretRef: &corev1.LocalObjectReference{
+					Name: feast.initFeastRestSvc(RegistryFeastType).Name + tlsNameSuffix,
+				},
+			}
 		}
 	} else if remote, err := feast.remoteRegistryOpenshiftTls(); remote {
 		// if the remote registry reference is using openshift's service serving certificates, we can use the injected service CA bundle configMap
@@ -184,6 +209,7 @@ func (feast *FeastServices) mountTlsConfigs(podSpec *corev1.PodSpec) {
 	feast.mountTlsConfig(OfflineFeastType, podSpec)
 	feast.mountTlsConfig(OnlineFeastType, podSpec)
 	feast.mountTlsConfig(UIFeastType, podSpec)
+	feast.mountCustomCABundle(podSpec)
 }
 
 func (feast *FeastServices) mountTlsConfig(feastType FeastServiceType, podSpec *corev1.PodSpec) {
@@ -227,6 +253,63 @@ func mountTlsRemoteRegistryConfig(podSpec *corev1.PodSpec, tls *feastdevv1alpha1
 			})
 		}
 	}
+}
+
+func (feast *FeastServices) mountCustomCABundle(podSpec *corev1.PodSpec) {
+	customCaBundle := feast.GetCustomCertificatesBundle()
+	if customCaBundle.IsDefined {
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: customCaBundle.VolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: customCaBundle.ConfigMapName},
+				},
+			},
+		})
+
+		for i := range podSpec.Containers {
+			podSpec.Containers[i].VolumeMounts = append(podSpec.Containers[i].VolumeMounts, corev1.VolumeMount{
+				Name:      customCaBundle.VolumeName,
+				MountPath: tlsPathCustomCABundle,
+				ReadOnly:  true,
+				SubPath:   "ca-bundle.crt",
+			})
+		}
+
+		log.FromContext(feast.Handler.Context).Info("Mounted custom CA bundle ConfigMap to Feast pods.")
+	}
+}
+
+// GetCustomCertificatesBundle retrieves the custom CA bundle ConfigMap if it exists when deployed with RHOAI or ODH
+func (feast *FeastServices) GetCustomCertificatesBundle() CustomCertificatesBundle {
+	var customCertificatesBundle CustomCertificatesBundle
+	configMapList := &corev1.ConfigMapList{}
+	labelSelector := client.MatchingLabels{caBundleAnnotation: "true"}
+
+	err := feast.Handler.Client.List(
+		feast.Handler.Context,
+		configMapList,
+		client.InNamespace(feast.Handler.FeatureStore.Namespace),
+		labelSelector,
+	)
+	if err != nil {
+		log.FromContext(feast.Handler.Context).Error(err, "Error listing ConfigMaps. Not using custom CA bundle.")
+		return customCertificatesBundle
+	}
+
+	// Check  if caBundleName exists
+	for _, cm := range configMapList.Items {
+		if cm.Name == caBundleName {
+			log.FromContext(feast.Handler.Context).Info("Found trusted CA bundle ConfigMap. Using custom CA bundle.")
+			customCertificatesBundle.IsDefined = true
+			customCertificatesBundle.VolumeName = caBundleName
+			customCertificatesBundle.ConfigMapName = caBundleName
+			return customCertificatesBundle
+		}
+	}
+
+	log.FromContext(feast.Handler.Context).Info("CA bundle ConfigMap named '" + caBundleName + "' not found. Not using custom CA bundle.")
+	return customCertificatesBundle
 }
 
 func getPortStr(tls *feastdevv1alpha1.TlsConfigs) string {

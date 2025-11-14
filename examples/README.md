@@ -12,10 +12,12 @@ The following examples illustrate various **Feast** use cases to enhance underst
 1. **[Remote Offline Store](remote-offline-store)**: Demonstrates how to set up and use a remote offline store.
 1. **[Podman/Podman Compose Local](podman_local)**: Demonstrates how to deploy Feast remote server components using Podman Compose locally.
 1. **[RHOAI Feast Demo](rhoai-quickstart)**: Showcases Feast's core functionality using a Jupyter notebook, including fetching online feature data from a remote server and retrieving metadata from a remote registry.
+1. **[RAG Fine Tuning with Feast and Milvus](rag-retriever)**: Demonstrates end-to-end RAG fine-tuning using Feast and Milvus, including data preparation, embedding generation, feature store setup, and RAG system implementation with custom FeastRagRetriever.
 
 # Feast Operator Examples
 
 The examples below showcase how to deploy and manage **Feast on Kubernetes** using the **Feast Go Operator**.
 
 1. **[Operator Quickstart](operator-quickstart)**: Demonstrates how to install and use Feast on Kubernetes with the Feast Go Operator.
-1. **[Operator Quickstart with Postgres in TLS](operator-postgres-tls-demo)**: Demonstrates installing and configuring Feast with PostgreSQL in TLS mode on Kubernetes using the Feast Go Operator, with an emphasis on volumes and VolumeMounts support.  
+1. **[Operator Quickstart with Postgres in TLS](operator-postgres-tls-demo)**: Demonstrates installing and configuring Feast with PostgreSQL in TLS mode on Kubernetes using the Feast Go Operator, with an emphasis on volumes and VolumeMounts support.
+1. **[Operator RBAC with Kubernetes](operator-rbac)**: Demonstrates the Feast RBAC example on Kubernetes using the Feast Operator.

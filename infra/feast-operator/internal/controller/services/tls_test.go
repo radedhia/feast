@@ -17,11 +17,12 @@ limitations under the License.
 package services
 
 import (
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"context"
 
 	feastdevv1alpha1 "github.com/feast-dev/feast/infra/feast-operator/api/v1alpha1"
 	"github.com/feast-dev/feast/infra/feast-operator/internal/controller/handler"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -46,14 +47,18 @@ var _ = Describe("TLS Config", func() {
 			// registry server w/o tls
 			feast := FeastServices{
 				Handler: handler.FeastHandler{
-					FeatureStore: minimalFeatureStore(),
+					Client:       k8sClient,
 					Scheme:       scheme,
+					Context:      context.TODO(),
+					FeatureStore: minimalFeatureStore(),
 				},
 			}
 			feast.Handler.FeatureStore.Spec.Services = &feastdevv1alpha1.FeatureStoreServices{
 				Registry: &feastdevv1alpha1.Registry{
 					Local: &feastdevv1alpha1.LocalRegistryConfig{
-						Server: &feastdevv1alpha1.ServerConfigs{},
+						Server: &feastdevv1alpha1.RegistryServerConfigs{
+							ServerConfigs: feastdevv1alpha1.ServerConfigs{},
+						},
 					},
 				},
 			}
@@ -82,7 +87,9 @@ var _ = Describe("TLS Config", func() {
 			feast.Handler.FeatureStore.Spec.Services = &feastdevv1alpha1.FeatureStoreServices{
 				Registry: &feastdevv1alpha1.Registry{
 					Local: &feastdevv1alpha1.LocalRegistryConfig{
-						Server: &feastdevv1alpha1.ServerConfigs{},
+						Server: &feastdevv1alpha1.RegistryServerConfigs{
+							ServerConfigs: feastdevv1alpha1.ServerConfigs{},
+						},
 					},
 				},
 			}
@@ -121,7 +128,7 @@ var _ = Describe("TLS Config", func() {
 			err = feast.ApplyDefaults()
 			Expect(err).ToNot(HaveOccurred())
 
-			repoConfig, err := getClientRepoConfig(feast.Handler.FeatureStore, emptyMockExtractConfigFromSecret)
+			repoConfig, err := getClientRepoConfig(feast.Handler.FeatureStore, emptyMockExtractConfigFromSecret, &feast)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(repoConfig.OfflineStore.Port).To(Equal(HttpsPort))
 			Expect(repoConfig.OfflineStore.Scheme).To(Equal(HttpsScheme))
@@ -187,11 +194,13 @@ var _ = Describe("TLS Config", func() {
 				},
 				Registry: &feastdevv1alpha1.Registry{
 					Local: &feastdevv1alpha1.LocalRegistryConfig{
-						Server: &feastdevv1alpha1.ServerConfigs{
-							TLS: &feastdevv1alpha1.TlsConfigs{
-								SecretRef: &corev1.LocalObjectReference{},
-								SecretKeyNames: feastdevv1alpha1.SecretKeyNames{
-									TlsCrt: "test.crt",
+						Server: &feastdevv1alpha1.RegistryServerConfigs{
+							ServerConfigs: feastdevv1alpha1.ServerConfigs{
+								TLS: &feastdevv1alpha1.TlsConfigs{
+									SecretRef: &corev1.LocalObjectReference{},
+									SecretKeyNames: feastdevv1alpha1.SecretKeyNames{
+										TlsCrt: "test.crt",
+									},
 								},
 							},
 						},
@@ -241,9 +250,11 @@ var _ = Describe("TLS Config", func() {
 			}
 			feast.Handler.FeatureStore.Spec.Services.Registry = &feastdevv1alpha1.Registry{
 				Local: &feastdevv1alpha1.LocalRegistryConfig{
-					Server: &feastdevv1alpha1.ServerConfigs{
-						TLS: &feastdevv1alpha1.TlsConfigs{
-							Disable: &disable,
+					Server: &feastdevv1alpha1.RegistryServerConfigs{
+						ServerConfigs: feastdevv1alpha1.ServerConfigs{
+							TLS: &feastdevv1alpha1.TlsConfigs{
+								Disable: &disable,
+							},
 						},
 					},
 				},
@@ -251,7 +262,7 @@ var _ = Describe("TLS Config", func() {
 			err = feast.ApplyDefaults()
 			Expect(err).ToNot(HaveOccurred())
 
-			repoConfig, err = getClientRepoConfig(feast.Handler.FeatureStore, emptyMockExtractConfigFromSecret)
+			repoConfig, err = getClientRepoConfig(feast.Handler.FeatureStore, emptyMockExtractConfigFromSecret, &feast)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(repoConfig.OfflineStore.Port).To(Equal(HttpsPort))
 			Expect(repoConfig.OfflineStore.Scheme).To(Equal(HttpsScheme))
@@ -291,19 +302,19 @@ var _ = Describe("TLS Config", func() {
 			// check k8s service objects
 			offlineSvc := feast.initFeastSvc(OfflineFeastType)
 			Expect(offlineSvc.Annotations).To(BeEmpty())
-			err = feast.setService(offlineSvc, OfflineFeastType)
+			err = feast.setService(offlineSvc, OfflineFeastType, false)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(offlineSvc.Annotations).NotTo(BeEmpty())
 			Expect(offlineSvc.Spec.Ports[0].Name).To(Equal(HttpsScheme))
 
 			onlineSvc := feast.initFeastSvc(OnlineFeastType)
-			err = feast.setService(onlineSvc, OnlineFeastType)
+			err = feast.setService(onlineSvc, OnlineFeastType, false)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(onlineSvc.Annotations).To(BeEmpty())
 			Expect(onlineSvc.Spec.Ports[0].Name).To(Equal(HttpScheme))
 
 			uiSvc := feast.initFeastSvc(UIFeastType)
-			err = feast.setService(uiSvc, UIFeastType)
+			err = feast.setService(uiSvc, UIFeastType, false)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(uiSvc.Annotations).To(BeEmpty())
 			Expect(uiSvc.Spec.Ports[0].Name).To(Equal(HttpScheme))
@@ -325,6 +336,46 @@ var _ = Describe("TLS Config", func() {
 			Expect(GetUIContainer(*feastDeploy).Command).NotTo(ContainElements(ContainSubstring("--key")))
 			Expect(GetUIContainer(*feastDeploy).VolumeMounts).To(HaveLen(1))
 
+			// Test REST registry server TLS configuration
+			feast.Handler.FeatureStore = minimalFeatureStore()
+			restEnabled := true
+			grpcEnabled := false
+			feast.Handler.FeatureStore.Spec.Services = &feastdevv1alpha1.FeatureStoreServices{
+				Registry: &feastdevv1alpha1.Registry{
+					Local: &feastdevv1alpha1.LocalRegistryConfig{
+						Server: &feastdevv1alpha1.RegistryServerConfigs{
+							ServerConfigs: feastdevv1alpha1.ServerConfigs{},
+							RestAPI:       &restEnabled,
+							GRPC:          &grpcEnabled,
+						},
+					},
+				},
+			}
+			testSetIsOpenShift()
+			err = feast.ApplyDefaults()
+			Expect(err).ToNot(HaveOccurred())
+
+			tls = feast.getTlsConfigs(RegistryFeastType)
+			Expect(tls).NotTo(BeNil())
+			Expect(tls.IsTLS()).To(BeTrue())
+			Expect(tls.SecretRef).NotTo(BeNil())
+			Expect(tls.SecretRef.Name).To(Equal("feast-test-registry-rest-tls"))
+			Expect(tls.SecretKeyNames).To(Equal(secretKeyNames))
+			Expect(getPortStr(tls)).To(Equal("443"))
+			Expect(GetTlsPath(RegistryFeastType)).To(Equal("/tls/registry/"))
+
+			registryRestSvc := feast.initFeastRestSvc(RegistryFeastType)
+			err = feast.setService(registryRestSvc, RegistryFeastType, true)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(registryRestSvc.Annotations).NotTo(BeEmpty())
+			Expect(registryRestSvc.Spec.Ports[0].Name).To(Equal(HttpsScheme))
+
+			feastDeploy = feast.initFeastDeploy()
+			err = feast.setDeployment(feastDeploy)
+			Expect(err).ToNot(HaveOccurred())
+			registryContainer := GetRegistryContainer(*feastDeploy)
+			Expect(registryContainer).NotTo(BeNil())
+			Expect(registryContainer.Command).To(ContainElements(ContainSubstring("--key")))
 		})
 	})
 })

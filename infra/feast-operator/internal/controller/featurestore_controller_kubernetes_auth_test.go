@@ -200,7 +200,7 @@ var _ = Describe("FeatureStore Controller-Kubernetes authorization", func() {
 				Namespace: objMeta.Namespace,
 			}, deploy)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(deploy.Spec.Replicas).To(Equal(&services.DefaultReplicas))
+			Expect(deploy.Spec.Replicas).To(Equal(int32Ptr(1)))
 			Expect(controllerutil.HasControllerReference(deploy)).To(BeTrue())
 			Expect(deploy.Spec.Template.Spec.Containers).To(HaveLen(4))
 			Expect(deploy.Spec.Template.Spec.Volumes).To(HaveLen(1))
@@ -227,7 +227,7 @@ var _ = Describe("FeatureStore Controller-Kubernetes authorization", func() {
 				feastRole)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(feastRole.Rules).ToNot(BeEmpty())
-			Expect(feastRole.Rules).To(HaveLen(1))
+			Expect(feastRole.Rules).To(HaveLen(6))
 			Expect(feastRole.Rules[0].APIGroups).To(HaveLen(1))
 			Expect(feastRole.Rules[0].APIGroups[0]).To(Equal(rbacv1.GroupName))
 			Expect(feastRole.Rules[0].Resources).To(HaveLen(2))

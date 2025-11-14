@@ -125,6 +125,12 @@ func ApplyDefaultsToStatus(cr *feastdevv1alpha1.FeatureStore) {
 
 			if services.Registry.Local.Server != nil {
 				setDefaultCtrConfigs(&services.Registry.Local.Server.ContainerConfigs.DefaultCtrConfigs)
+				// Set default for GRPC: true if nil
+				if services.Registry.Local.Server.GRPC == nil {
+					defaultGRPC := true
+					services.Registry.Local.Server.GRPC = &defaultGRPC
+				}
+
 			}
 		} else if services.Registry.Remote.FeastRef != nil && len(services.Registry.Remote.FeastRef.Namespace) == 0 {
 			services.Registry.Remote.FeastRef.Namespace = cr.Namespace
@@ -181,6 +187,11 @@ func ApplyDefaultsToStatus(cr *feastdevv1alpha1.FeatureStore) {
 	if services.UI != nil {
 		setDefaultCtrConfigs(&services.UI.ContainerConfigs.DefaultCtrConfigs)
 	}
+
+	if applied.CronJob == nil {
+		applied.CronJob = &feastdevv1alpha1.FeastCronJob{}
+	}
+	setDefaultCronJobConfigs(applied.CronJob)
 }
 
 func setDefaultCtrConfigs(defaultConfigs *feastdevv1alpha1.DefaultCtrConfigs) {
@@ -467,4 +478,12 @@ func getVolumeMountByType(feastType FeastServiceType, featureStore *feastdevv1al
 		}
 	}
 	return nil
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func int64Ptr(value int64) *int64 {
+	return &value
 }

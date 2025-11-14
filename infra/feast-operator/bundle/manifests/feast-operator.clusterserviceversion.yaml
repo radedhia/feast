@@ -18,7 +18,7 @@ metadata:
           "apiVersion": "feast.dev/v1alpha1",
           "kind": "FeatureStore",
           "metadata": {
-            "name": "sample-all-servers"
+            "name": "sample-remote-servers"
           },
           "spec": {
             "feastProject": "my_project",
@@ -34,13 +34,26 @@ metadata:
               "ui": {}
             }
           }
+        },
+        {
+          "apiVersion": "feast.dev/v1alpha1",
+          "kind": "FeatureStore",
+          "metadata": {
+            "name": "sample-ui"
+          },
+          "spec": {
+            "feastProject": "my_project",
+            "services": {
+              "ui": {}
+            }
+          }
         }
       ]
     capabilities: Basic Install
-    createdAt: "2025-02-17T22:19:00Z"
+    createdAt: "2025-10-27T20:28:39Z"
     operators.operatorframework.io/builder: operator-sdk-v1.38.0
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
-  name: feast-operator.v0.46.0
+  name: feast-operator.v0.56.0
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -72,6 +85,24 @@ spec:
           - update
           - watch
         - apiGroups:
+          - authentication.k8s.io
+          resources:
+          - tokenreviews
+          verbs:
+          - create
+        - apiGroups:
+          - batch
+          resources:
+          - cronjobs
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
           - ""
           resources:
           - configmaps
@@ -88,10 +119,19 @@ spec:
         - apiGroups:
           - ""
           resources:
+          - namespaces
+          - pods
           - secrets
           verbs:
           - get
           - list
+          - watch
+        - apiGroups:
+          - ""
+          resources:
+          - pods/exec
+          verbs:
+          - create
         - apiGroups:
           - feast.dev
           resources:
@@ -121,8 +161,11 @@ spec:
         - apiGroups:
           - rbac.authorization.k8s.io
           resources:
+          - clusterrolebindings
+          - clusterroles
           - rolebindings
           - roles
+          - subjectaccessreviews
           verbs:
           - create
           - delete
@@ -182,8 +225,10 @@ spec:
                 - /manager
                 env:
                 - name: RELATED_IMAGE_FEATURE_SERVER
-                  value: docker.io/feastdev/feature-server:0.46.0
-                image: feastdev/feast-operator:0.46.0
+                  value: quay.io/feastdev/feature-server:0.56.0
+                - name: RELATED_IMAGE_CRON_JOB
+                  value: quay.io/openshift/origin-cli:4.17
+                image: quay.io/feastdev/feast-operator:0.56.0
                 livenessProbe:
                   httpGet:
                     path: /healthz
@@ -199,8 +244,8 @@ spec:
                   periodSeconds: 10
                 resources:
                   limits:
-                    cpu: 500m
-                    memory: 128Mi
+                    cpu: "1"
+                    memory: 256Mi
                   requests:
                     cpu: 10m
                     memory: 64Mi
@@ -273,6 +318,8 @@ spec:
     name: Feast Community
     url: https://lf-aidata.atlassian.net/wiki/spaces/FEAST/
   relatedImages:
-  - image: docker.io/feastdev/feature-server:0.46.0
+  - image: quay.io/feastdev/feature-server:0.56.0
     name: feature-server
-  version: 0.46.0
+  - image: quay.io/openshift/origin-cli:4.17
+    name: cron-job
+  version: 0.56.0

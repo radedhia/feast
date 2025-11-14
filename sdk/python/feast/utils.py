@@ -32,6 +32,8 @@ from feast.errors import (
     FeatureViewNotFoundException,
     RequestDataNotFoundInEntityRowsException,
 )
+from feast.field import Field
+from feast.infra.compute_engines.backends.pandas_backend import PandasBackend
 from feast.infra.key_encoding_utils import deserialize_entity_key
 from feast.protos.feast.serving.ServingService_pb2 import (
     FieldStatus,
@@ -256,7 +258,11 @@ def _convert_arrow_to_proto(
     join_keys: Dict[str, ValueType],
 ) -> List[Tuple[EntityKeyProto, Dict[str, ValueProto], datetime, Optional[datetime]]]:
     # This is a workaround for isinstance(feature_view, OnDemandFeatureView), which triggers a circular import
-    if getattr(feature_view, "source_request_sources", None):
+    # Check for source_request_sources or source_feature_view_projections attributes to identify ODFVs
+    if (
+        getattr(feature_view, "source_request_sources", None) is not None
+        or getattr(feature_view, "source_feature_view_projections", None) is not None
+    ):
         return _convert_arrow_odfv_to_proto(table, feature_view, join_keys)  # type: ignore[arg-type]
     else:
         return _convert_arrow_fv_to_proto(table, feature_view, join_keys)  # type: ignore[arg-type]
@@ -271,6 +277,7 @@ def _convert_arrow_fv_to_proto(
     if isinstance(table, pyarrow.Table):
         table = table.to_batches()[0]
 
+    # TODO: This will break if the feature view has aggregations or transformations
     columns = [
         (field.name, field.dtype.to_value_type()) for field in feature_view.features
     ] + list(join_keys.items())
@@ -343,6 +350,22 @@ def _convert_arrow_odfv_to_proto(
         for column, value_type in columns
         if column in table.column_names
     }
+
+    # Ensure join keys are included in proto_values_by_column, but check if they exist first
+    for join_key, value_type in join_keys.items():
+        if join_key not in proto_values_by_column:
+            # Check if the join key exists in the table before trying to access it
+            if join_key in table.column_names:
+                proto_values_by_column[join_key] = python_values_to_proto_values(
+                    table.column(join_key).to_numpy(zero_copy_only=False), value_type
+                )
+            else:
+                # Create null/default values if the join key isn't in the table
+                null_column = [None] * table.num_rows
+                proto_values_by_column[join_key] = python_values_to_proto_values(
+                    null_column, value_type
+                )
+
     # Adding On Demand Features
     for feature in feature_view.features:
         if (
@@ -357,7 +380,7 @@ def _convert_arrow_odfv_to_proto(
             updated_table = pyarrow.RecordBatch.from_arrays(
                 table.columns + [null_column],
                 schema=table.schema.append(
-                    pyarrow.field(feature.name, null_column.type)
+                    pyarrow.field(feature.name, null_column.type)  # type: ignore[attr-defined]
                 ),
             )
             proto_values_by_column[feature.name] = python_values_to_proto_values(
@@ -368,7 +391,11 @@ def _convert_arrow_odfv_to_proto(
     entity_keys = [
         EntityKeyProto(
             join_keys=join_keys,
-            entity_values=[proto_values_by_column[k][idx] for k in join_keys],
+            entity_values=[
+                proto_values_by_column[k][idx]
+                for k in join_keys
+                if k in proto_values_by_column
+            ],
         )
         for idx in range(table.num_rows)
     ]
@@ -377,7 +404,14 @@ def _convert_arrow_odfv_to_proto(
     feature_dict = {
         feature.name: proto_values_by_column[feature.name]
         for feature in feature_view.features
+        if feature.name in proto_values_by_column
     }
+    if feature_view.write_to_online_store:
+        table_columns = [col.name for col in table.schema]
+        for feature in feature_view.schema:
+            if feature.name not in feature_dict and feature.name in table_columns:
+                feature_dict[feature.name] = proto_values_by_column[feature.name]
+
     features = [dict(zip(feature_dict, vars)) for vars in zip(*feature_dict.values())]
 
     # We need to artificially add event_timestamps and created_timestamps
@@ -441,19 +475,24 @@ def _group_feature_refs(
     all_feature_views: List["FeatureView"],
     all_on_demand_feature_views: List["OnDemandFeatureView"],
 ) -> Tuple[
-    List[Tuple["FeatureView", List[str]]], List[Tuple["OnDemandFeatureView", List[str]]]
+    List[Tuple[Union["FeatureView", "OnDemandFeatureView"], List[str]]],
+    List[Tuple["OnDemandFeatureView", List[str]]],
 ]:
     """Get list of feature views and corresponding feature names based on feature references"""
 
     # view name to view proto
-    view_index = {view.projection.name_to_use(): view for view in all_feature_views}
+    view_index: Dict[str, Union["FeatureView", "OnDemandFeatureView"]] = {
+        view.projection.name_to_use(): view for view in all_feature_views
+    }
 
     # on demand view to on demand view proto
-    on_demand_view_index = {
-        view.projection.name_to_use(): view
-        for view in all_on_demand_feature_views
-        if view.projection
-    }
+    on_demand_view_index: Dict[str, "OnDemandFeatureView"] = {}
+    for view in all_on_demand_feature_views:
+        if view.projection and not view.write_to_online_store:
+            on_demand_view_index[view.projection.name_to_use()] = view
+        elif view.projection and view.write_to_online_store:
+            # we insert the ODFV view to FVs for ones that are written to the online store
+            view_index[view.projection.name_to_use()] = view
 
     # view name to feature names
     views_features = defaultdict(set)
@@ -464,7 +503,16 @@ def _group_feature_refs(
     for ref in features:
         view_name, feat_name = ref.split(":")
         if view_name in view_index:
-            view_index[view_name].projection.get_feature(feat_name)  # For validation
+            if hasattr(view_index[view_name], "write_to_online_store"):
+                tmp_feat_name = [
+                    f for f in view_index[view_name].schema if f.name == feat_name
+                ]
+                if len(tmp_feat_name) > 0:
+                    feat_name = tmp_feat_name[0].name
+            else:
+                view_index[view_name].projection.get_feature(
+                    feat_name
+                )  # For validation
             views_features[view_name].add(feat_name)
         elif view_name in on_demand_view_index:
             on_demand_view_index[view_name].projection.get_feature(
@@ -480,7 +528,7 @@ def _group_feature_refs(
         else:
             raise FeatureViewNotFoundException(view_name)
 
-    fvs_result: List[Tuple["FeatureView", List[str]]] = []
+    fvs_result: List[Tuple[Union["FeatureView", "OnDemandFeatureView"], List[str]]] = []
     odfvs_result: List[Tuple["OnDemandFeatureView", List[str]]] = []
 
     for view_name, feature_names in views_features.items():
@@ -512,6 +560,76 @@ def construct_response_feature_vector(
         statuses=statuses_output,
         event_timestamps=timestamp_output,
     )
+
+
+def _get_aggregate_operations(agg_specs) -> dict:
+    """
+    Convert Aggregation specs to agg_ops format for PandasBackend.
+
+    Reused from LocalFeatureBuilder logic.
+    TODO: This logic is duplicated from feast.infra.compute_engines.local.feature_builder.LocalFeatureBuilder._get_aggregate_operations().
+    Consider refactoring to a shared utility module in the future.
+    """
+    agg_ops = {}
+    for agg in agg_specs:
+        if agg.time_window is not None:
+            raise ValueError(
+                "Time window aggregation is not supported in online serving."
+            )
+        alias = f"{agg.function}_{agg.column}"
+        agg_ops[alias] = (agg.function, agg.column)
+    return agg_ops
+
+
+def _apply_aggregations_to_response(
+    response_data: Union[pyarrow.Table, Dict[str, List[Any]]],
+    aggregations,
+    group_keys: Optional[List[str]],
+    mode: str,
+) -> Union[pyarrow.Table, Dict[str, List[Any]]]:
+    """
+    Apply aggregations using PandasBackend.
+
+    Args:
+        response_data: Either a pyarrow.Table or dict of lists containing the data
+        aggregations: List of Aggregation objects to apply
+        group_keys: List of column names to group by (optional)
+        mode: Transformation mode ("python", "pandas", or "substrait")
+
+    Returns:
+        Aggregated data in the same format as input
+
+    TODO: Consider refactoring to support backends other than pandas in the future.
+    """
+    if not aggregations:
+        return response_data
+
+    backend = PandasBackend()
+
+    # Convert to pandas DataFrame
+    if isinstance(response_data, dict):
+        df = pd.DataFrame(response_data)
+    else:  # pyarrow.Table
+        df = backend.from_arrow(response_data)
+
+    if df.empty:
+        return response_data
+
+    # Convert aggregations to agg_ops format
+    agg_ops = _get_aggregate_operations(aggregations)
+
+    # Apply aggregations using PandasBackend
+    if group_keys:
+        result_df = backend.groupby_agg(df, group_keys, agg_ops)
+    else:
+        # No grouping - aggregate over entire dataset
+        result_df = backend.groupby_agg(df, [], agg_ops)
+
+    # Convert back to original format
+    if mode == "python":
+        return {col: result_df[col].tolist() for col in result_df.columns}
+    else:  # pandas or substrait
+        return backend.to_arrow(result_df)
 
 
 def _augment_response_with_on_demand_transforms(
@@ -557,73 +675,98 @@ def _augment_response_with_on_demand_transforms(
     odfv_result_names = set()
     for odfv_name, _feature_refs in odfv_feature_refs.items():
         odfv = requested_odfv_map[odfv_name]
-        if odfv.mode == "python":
-            if initial_response_dict is None:
-                initial_response_dict = initial_response.to_dict()
-            transformed_features_dict: Dict[str, List[Any]] = odfv.transform_dict(
-                initial_response_dict
-            )
-        elif odfv.mode in {"pandas", "substrait"}:
-            if initial_response_arrow is None:
-                initial_response_arrow = initial_response.to_arrow()
-            transformed_features_arrow = odfv.transform_arrow(
-                initial_response_arrow, full_feature_names
-            )
-        else:
-            raise Exception(
-                f"Invalid OnDemandFeatureMode: {odfv.mode}. Expected one of 'pandas', 'python', or 'substrait'."
-            )
-
-        transformed_features = (
-            transformed_features_dict
-            if odfv.mode == "python"
-            else transformed_features_arrow
-        )
-        transformed_columns = (
-            transformed_features.column_names
-            if isinstance(transformed_features, pyarrow.Table)
-            else transformed_features
-        )
-        selected_subset = [f for f in transformed_columns if f in _feature_refs]
-
-        proto_values = []
-        schema_dict = {k.name: k.dtype for k in odfv.schema}
-        for selected_feature in selected_subset:
-            feature_vector = transformed_features[selected_feature]
-            selected_feature_type = schema_dict.get(selected_feature, None)
-            feature_type: ValueType = ValueType.UNKNOWN
-            if selected_feature_type is not None:
-                if isinstance(
-                    selected_feature_type, (ComplexFeastType, PrimitiveFeastType)
-                ):
-                    feature_type = selected_feature_type.to_value_type()
-                elif not isinstance(selected_feature_type, ValueType):
-                    raise TypeError(
-                        f"Unexpected type for feature_type: {type(feature_type)}"
+        if not odfv.write_to_online_store:
+            # Apply aggregations if configured.
+            if odfv.aggregations:
+                if odfv.mode == "python":
+                    if initial_response_dict is None:
+                        initial_response_dict = initial_response.to_dict()
+                    initial_response_dict = _apply_aggregations_to_response(
+                        initial_response_dict,
+                        odfv.aggregations,
+                        odfv.entities,
+                        odfv.mode,
+                    )
+                elif odfv.mode in {"pandas", "substrait"}:
+                    if initial_response_arrow is None:
+                        initial_response_arrow = initial_response.to_arrow()
+                    initial_response_arrow = _apply_aggregations_to_response(
+                        initial_response_arrow,
+                        odfv.aggregations,
+                        odfv.entities,
+                        odfv.mode,
                     )
 
-            proto_values.append(
-                python_values_to_proto_values(
-                    feature_vector
-                    if isinstance(feature_vector, list)
-                    else [feature_vector]
-                    if odfv.mode == "python"
-                    else feature_vector.to_numpy(),
-                    feature_type,
+            # Apply transformation. Note: aggregations and transformation configs are mutually exclusive
+            # TODO: Fix to make it work for having both aggregation and transformation
+            #  ticket: https://github.com/feast-dev/feast/issues/5689
+            elif odfv.mode == "python":
+                if initial_response_dict is None:
+                    initial_response_dict = initial_response.to_dict()
+                transformed_features_dict: Dict[str, List[Any]] = odfv.transform_dict(
+                    initial_response_dict
                 )
-            )
-
-        odfv_result_names |= set(selected_subset)
-
-        online_features_response.metadata.feature_names.val.extend(selected_subset)
-        for feature_idx in range(len(selected_subset)):
-            online_features_response.results.append(
-                GetOnlineFeaturesResponse.FeatureVector(
-                    values=proto_values[feature_idx],
-                    statuses=[FieldStatus.PRESENT] * len(proto_values[feature_idx]),
-                    event_timestamps=[Timestamp()] * len(proto_values[feature_idx]),
+            elif odfv.mode in {"pandas", "substrait"}:
+                if initial_response_arrow is None:
+                    initial_response_arrow = initial_response.to_arrow()
+                transformed_features_arrow = odfv.transform_arrow(
+                    initial_response_arrow, full_feature_names
                 )
+            else:
+                raise Exception(
+                    f"Invalid OnDemandFeatureMode: {odfv.mode}. Expected one of 'pandas', 'python', or 'substrait'."
+                )
+
+            transformed_features = (
+                transformed_features_dict
+                if odfv.mode == "python"
+                else transformed_features_arrow
             )
+            transformed_columns = (
+                transformed_features.column_names
+                if isinstance(transformed_features, pyarrow.Table)
+                else transformed_features
+            )
+            selected_subset = [f for f in transformed_columns if f in _feature_refs]
+
+            proto_values = []
+            schema_dict = {k.name: k.dtype for k in odfv.schema}
+            for selected_feature in selected_subset:
+                feature_vector = transformed_features[selected_feature]
+                selected_feature_type = schema_dict.get(selected_feature, None)
+                feature_type: ValueType = ValueType.UNKNOWN
+                if selected_feature_type is not None:
+                    if isinstance(
+                        selected_feature_type, (ComplexFeastType, PrimitiveFeastType)
+                    ):
+                        feature_type = selected_feature_type.to_value_type()
+                    elif not isinstance(selected_feature_type, ValueType):
+                        raise TypeError(
+                            f"Unexpected type for feature_type: {type(feature_type)}"
+                        )
+
+                proto_values.append(
+                    python_values_to_proto_values(
+                        feature_vector
+                        if isinstance(feature_vector, list)
+                        else [feature_vector]
+                        if odfv.mode == "python"
+                        else feature_vector.to_numpy(),
+                        feature_type,
+                    )
+                )
+
+            odfv_result_names |= set(selected_subset)
+
+            online_features_response.metadata.feature_names.val.extend(selected_subset)
+            for feature_idx in range(len(selected_subset)):
+                online_features_response.results.append(
+                    GetOnlineFeaturesResponse.FeatureVector(
+                        values=proto_values[feature_idx],
+                        statuses=[FieldStatus.PRESENT] * len(proto_values[feature_idx]),
+                        event_timestamps=[Timestamp()] * len(proto_values[feature_idx]),
+                    )
+                )
 
 
 def _get_entity_maps(
@@ -649,8 +792,13 @@ def _get_entity_maps(
                 entity.join_key, entity.join_key
             )
             entity_name_to_join_key_map[entity_name] = join_key
+
         for entity_column in feature_view.entity_columns:
-            entity_type_map[entity_column.name] = entity_column.dtype.to_value_type()
+            dtype = entity_column.dtype.to_value_type()
+            entity_join_key_column_name = feature_view.projection.join_key_map.get(
+                entity_column.name, entity_column.name
+            )
+            entity_type_map[entity_join_key_column_name] = dtype
 
     return (
         entity_name_to_join_key_map,
@@ -821,6 +969,7 @@ def get_needed_request_data(
     needed_request_data: Set[str] = set()
     for odfv, _ in grouped_odfv_refs:
         odfv_request_data_schema = odfv.get_request_data_schema()
+        # if odfv.write_to_online_store, we should not pass in the request data
         needed_request_data.update(odfv_request_data_schema.keys())
     return needed_request_data
 
@@ -999,7 +1148,7 @@ def _list_feature_views(
 def _get_feature_views_to_use(
     registry: "BaseRegistry",
     project,
-    features: Optional[Union[List[str], "FeatureService"]],
+    features: Union[List[str], "FeatureService"],
     allow_cache=False,
     hide_dummy_entity: bool = True,
 ) -> Tuple[List["FeatureView"], List["OnDemandFeatureView"]]:
@@ -1109,7 +1258,7 @@ def _get_online_request_context(
     entityless_case = DUMMY_ENTITY_NAME in [
         entity_name
         for feature_view in feature_views
-        for entity_name in feature_view.entities
+        for entity_name in (feature_view.entities or [])
     ]
 
     return (
@@ -1172,7 +1321,13 @@ def _prepare_entities_to_read_from_online_store(
     odfv_entities: List[Entity] = []
     request_source_keys: List[str] = []
     for on_demand_feature_view in requested_on_demand_feature_views:
-        odfv_entities.append(*getattr(on_demand_feature_view, "entities", []))
+        entities_for_odfv = getattr(on_demand_feature_view, "entities", [])
+        if len(entities_for_odfv) > 0 and isinstance(entities_for_odfv[0], str):
+            entities_for_odfv = [
+                registry.get_entity(entity_name, project, allow_cache=True)
+                for entity_name in entities_for_odfv
+            ]
+        odfv_entities.extend(entities_for_odfv)
         for source in on_demand_feature_view.source_request_sources:
             source_schema = on_demand_feature_view.source_request_sources[source].schema
             for column in source_schema:
@@ -1355,3 +1510,16 @@ def _build_retrieve_online_document_record(
         vector_value_proto,
         distance_value_proto,
     )
+
+
+def _get_feature_view_vector_field_metadata(
+    feature_view,
+) -> Optional[Field]:
+    vector_fields = [field for field in feature_view.schema if field.vector_index]
+    if len(vector_fields) > 1:
+        raise ValueError(
+            f"Feature view {feature_view.name} has multiple vector fields. Only one vector field per feature view is supported."
+        )
+    if not vector_fields:
+        return None
+    return vector_fields[0]

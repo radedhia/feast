@@ -16,9 +16,20 @@ import logging
 import os
 import sqlite3
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 from pydantic import StrictStr
 
@@ -43,6 +54,7 @@ from feast.type_map import feast_value_type_to_python_type
 from feast.types import FEAST_VECTOR_TYPES, PrimitiveFeastType
 from feast.utils import (
     _build_retrieve_online_document_record,
+    _get_feature_view_vector_field_metadata,
     _serialize_vector_to_float_list,
     to_naive_utc,
 )
@@ -99,8 +111,6 @@ class SqliteOnlineStoreConfig(FeastConfigBaseModel, VectorStoreConfig):
     path: StrictStr = "data/online.db"
     """ (optional) Path to sqlite db """
 
-    vector_enabled: bool = False
-    vector_len: Optional[int] = None
     text_search_enabled: bool = False
 
 
@@ -167,9 +177,17 @@ class SqliteOnlineStore(OnlineStore):
                 table_name = _table_id(project, table)
                 for feature_name, val in values.items():
                     if config.online_store.vector_enabled:
-                        if feature_type_dict[feature_name] in FEAST_VECTOR_TYPES:
+                        if (
+                            feature_type_dict.get(feature_name, None)
+                            in FEAST_VECTOR_TYPES
+                        ):
+                            vector_field_length = getattr(
+                                _get_feature_view_vector_field_metadata(table),
+                                "vector_length",
+                                512,
+                            )
                             val_bin = serialize_f32(
-                                val.float_list_val.val, config.online_store.vector_len
+                                val.float_list_val.val, vector_field_length
                             )  # type: ignore
                         else:
                             val_bin = feast_value_type_to_python_type(val)
@@ -226,22 +244,22 @@ class SqliteOnlineStore(OnlineStore):
 
         result: List[Tuple[Optional[datetime], Optional[Dict[str, ValueProto]]]] = []
 
+        serialized_entity_keys = [
+            serialize_entity_key(
+                entity_key,
+                entity_key_serialization_version=config.entity_key_serialization_version,
+            )
+            for entity_key in entity_keys
+        ]
         # Fetch all entities in one go
         cur.execute(
             f"SELECT entity_key, feature_name, value, event_ts "
             f"FROM {_table_id(config.project, table)} "
             f"WHERE entity_key IN ({','.join('?' * len(entity_keys))}) "
             f"ORDER BY entity_key",
-            [
-                serialize_entity_key(
-                    entity_key,
-                    entity_key_serialization_version=config.entity_key_serialization_version,
-                )
-                for entity_key in entity_keys
-            ],
+            serialized_entity_keys,
         )
         rows = cur.fetchall()
-
         rows = {
             k: list(group) for k, group in itertools.groupby(rows, key=lambda r: r[0])
         }
@@ -256,7 +274,11 @@ class SqliteOnlineStore(OnlineStore):
                 val = ValueProto()
                 val.ParseFromString(val_bin)
                 res[feature_name] = val
-                res_ts = ts
+                ts = cast(datetime, ts)
+                if ts.tzinfo is not None:
+                    res_ts = ts.astimezone(timezone.utc)
+                else:
+                    res_ts = ts.replace(tzinfo=timezone.utc)
 
             if not res:
                 result.append((None, None))
@@ -319,8 +341,7 @@ class SqliteOnlineStore(OnlineStore):
         self,
         config: RepoConfig,
         table: FeatureView,
-        requested_feature: Optional[str],
-        requested_featuers: Optional[List[str]],
+        requested_features: List[str],
         embedding: List[float],
         top_k: int,
         distance_metric: Optional[str] = None,
@@ -338,7 +359,7 @@ class SqliteOnlineStore(OnlineStore):
         Args:
             config: Feast configuration object
             table: FeatureView object as the table to search
-            requested_feature: The requested feature as the column to search
+            requested_features: The list of requested features to retrieve
             embedding: The query embedding to search for
             top_k: The number of items to return
         Returns:
@@ -352,15 +373,19 @@ class SqliteOnlineStore(OnlineStore):
         conn = self._get_conn(config)
         cur = conn.cursor()
 
+        vector_field_length = getattr(
+            _get_feature_view_vector_field_metadata(table), "vector_length", 512
+        )
+
         # Convert the embedding to a binary format instead of using SerializeToString()
-        query_embedding_bin = serialize_f32(embedding, config.online_store.vector_len)
+        query_embedding_bin = serialize_f32(embedding, vector_field_length)
         table_name = _table_id(project, table)
         vector_field = _get_vector_field(table)
 
         cur.execute(
             f"""
             CREATE VIRTUAL TABLE vec_table using vec0(
-                vector_value float[{config.online_store.vector_len}]
+                vector_value float[{vector_field_length}]
         );
         """
         )
@@ -376,7 +401,7 @@ class SqliteOnlineStore(OnlineStore):
         cur.execute(
             f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS vec_table using vec0(
-                vector_value float[{config.online_store.vector_len}]
+                vector_value float[{vector_field_length}]
             );
             """
         )
@@ -474,18 +499,19 @@ class SqliteOnlineStore(OnlineStore):
         conn = self._get_conn(config)
         cur = conn.cursor()
 
-        if online_store.vector_enabled and not online_store.vector_len:
-            raise ValueError("vector_len is not configured in the online store config")
+        vector_field_length = getattr(
+            _get_feature_view_vector_field_metadata(table), "vector_length", 512
+        )
 
         table_name = _table_id(config.project, table)
         vector_field = _get_vector_field(table)
 
         if online_store.vector_enabled:
-            query_embedding_bin = serialize_f32(query, online_store.vector_len)  # type: ignore
+            query_embedding_bin = serialize_f32(query, vector_field_length)  # type: ignore
             cur.execute(
                 f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS vec_table using vec0(
-                    vector_value float[{online_store.vector_len}]
+                    vector_value float[{vector_field_length}]
                 );
                 """
             )
