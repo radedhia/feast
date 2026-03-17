@@ -1032,7 +1032,7 @@ CREATE TEMP TABLE __staged_join_{{ loop.index0 }} AS (
     FROM entity_dataframe
     {% for featureview in batch_group %}
     LEFT JOIN (
-        SELECT * EXCEPT ({{ featureview.entities | join(', ') }})
+        SELECT * EXCEPT ({{ featureview.entities | join(', ') }}, entity_timestamp, event_timestamp{% if featureview.created_timestamp_column %}, created_timestamp{% endif %})
         FROM {{ featureview.name }}__cleaned
     ) USING ({{featureview.name}}__entity_row_unique_id)
     {% endfor %}
@@ -1042,7 +1042,7 @@ SELECT {{ final_output_feature_names | backticks | join(', ')}}
 FROM __staged_join_{{ loop.index0 - 1 }}
 {% for featureview in batch_group %}
 LEFT JOIN (
-    SELECT * EXCEPT ({{ featureview.entities | join(', ') }})
+    SELECT * EXCEPT ({{ featureview.entities | join(', ') }}, entity_timestamp, event_timestamp{% if featureview.created_timestamp_column %}, created_timestamp{% endif %})
     FROM {{ featureview.name }}__cleaned
 ) USING ({{featureview.name}}__entity_row_unique_id)
 {% endfor %}
@@ -1052,7 +1052,7 @@ CREATE TEMP TABLE __staged_join_{{ loop.index0 }} AS (
     FROM __staged_join_{{ loop.index0 - 1 }}
     {% for featureview in batch_group %}
     LEFT JOIN (
-        SELECT * EXCEPT ({{ featureview.entities | join(', ') }})
+        SELECT * EXCEPT ({{ featureview.entities | join(', ') }}, entity_timestamp, event_timestamp{% if featureview.created_timestamp_column %}, created_timestamp{% endif %})
         FROM {{ featureview.name }}__cleaned
     ) USING ({{featureview.name}}__entity_row_unique_id)
     {% endfor %}
