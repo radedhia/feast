@@ -1009,14 +1009,54 @@ CREATE TEMP TABLE {{ featureview.name }}__cleaned AS (
 /*
  Joins the outputs of multiple time travel joins to a single table.
  The entity_dataframe dataset being our source of truth here.
+ When there are many feature views, the joins are staged into batches
+ to avoid exceeding BigQuery's query planner memory limit.
  */
 
+{% set batch_size = 15 %}
+{% set batches = featureviews | batch(batch_size) | list %}
+
+{% for batch_group in batches %}
+{% if loop.first and loop.last %}
 SELECT {{ final_output_feature_names | backticks | join(', ')}}
 FROM entity_dataframe
-{% for featureview in featureviews %}
+{% for featureview in batch_group %}
 LEFT JOIN (
-    SELECT * EXCEPT ( {{ featureview.entities | join(', ') }})
+    SELECT * EXCEPT ({{ featureview.entities | join(', ') }})
     FROM {{ featureview.name }}__cleaned
 ) USING ({{featureview.name}}__entity_row_unique_id)
+{% endfor %}
+{% elif loop.first %}
+CREATE TEMP TABLE __staged_join_{{ loop.index0 }} AS (
+    SELECT *
+    FROM entity_dataframe
+    {% for featureview in batch_group %}
+    LEFT JOIN (
+        SELECT * EXCEPT ({{ featureview.entities | join(', ') }}, entity_timestamp, event_timestamp{% if featureview.created_timestamp_column %}, created_timestamp{% endif %})
+        FROM {{ featureview.name }}__cleaned
+    ) USING ({{featureview.name}}__entity_row_unique_id)
+    {% endfor %}
+);
+{% elif loop.last %}
+SELECT {{ final_output_feature_names | backticks | join(', ')}}
+FROM __staged_join_{{ loop.index0 - 1 }}
+{% for featureview in batch_group %}
+LEFT JOIN (
+    SELECT * EXCEPT ({{ featureview.entities | join(', ') }}, entity_timestamp, event_timestamp{% if featureview.created_timestamp_column %}, created_timestamp{% endif %})
+    FROM {{ featureview.name }}__cleaned
+) USING ({{featureview.name}}__entity_row_unique_id)
+{% endfor %}
+{% else %}
+CREATE TEMP TABLE __staged_join_{{ loop.index0 }} AS (
+    SELECT *
+    FROM __staged_join_{{ loop.index0 - 1 }}
+    {% for featureview in batch_group %}
+    LEFT JOIN (
+        SELECT * EXCEPT ({{ featureview.entities | join(', ') }}, entity_timestamp, event_timestamp{% if featureview.created_timestamp_column %}, created_timestamp{% endif %})
+        FROM {{ featureview.name }}__cleaned
+    ) USING ({{featureview.name}}__entity_row_unique_id)
+    {% endfor %}
+);
+{% endif %}
 {% endfor %}
 """
